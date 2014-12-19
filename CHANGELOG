@@ -3,6 +3,21 @@ Version explained:
  minor : increase on risk of code breakage during a major release
  bug   : increase on bug or incremental changes
 
+Version 3.4.6
+ * Fix: a badly formated flow route would throw the parser in limbo
+    reported by: NickGudov (issue #203)
+ * Feature: JSON now includes ASN (local,peer) and IP (local,IP)
+    requested by: jtkdpu (issue #196)
+    patch by: Ryan Tinianov (pull #199) for the IP
+ * Feature: API support for sending eor
+    requested by: spakka (issue #109)
+ * Feature: allow routes to have a name (which can be used as comment)
+    requested by: lazy404 (issue #167)
+
+Version 3.4.5
+ * Fix: improper distribution of events to process workers
+    reported by: Tim Epkes
+
 Version 3.4.4
  * Fix: bug with IPv4 / ipv6 handling
  * Fix: better peer isolation when parsing messages
@@ -12,7 +27,25 @@ Version 3.4.4
  * Fix: show route extensive
     patch by: Michal Grzedzicki, thank you
  * Fix: 4-Octet AS Specific BGP Extended Community (RFC 5668)
-    path by: Michal Grzedzicki
+    patch by: Michal Grzedzicki
+ * Fix: bug with label encoding
+    patch by: Jesse Mather
+ * Improvement: add support for add-path with family MPLS
+    requested by: Tim Epkes
+ * Fix: bug when process writes multiple lines
+    reported by: Ilya Voronin
+ * Feature: accept packet with confedation (RFC 3065)
+    requested by: oriordan (with a patch, thank you)
+ * Fix: do not bark if an unknown ASPath attribute is found
+ * Fix: correctly accept connection on AF_INET6 socket
+    patch by: John W. O'Brien
+ * Fix: restore lost python2.6 compatibility
+    reported by: Minsuk Song
+ * Fix: IPv6 MD5
+    reported by: Dave J Knight
+ * Add framework to debug SIGUSR1 related problems
+ * Fix: do not drop session when receiving an unknown capability
+    patch by: Peter van Dijk (PowerDNS)
 
 Version 3.4.3
  * Fix: JSON message increment

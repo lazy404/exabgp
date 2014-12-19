@@ -115,6 +115,9 @@ class Withdrawn (object):
 	ID = Attribute.ID.INTERNAL_WITHDRAW
 	MULTIPLE = False
 
+class Name (str):
+	ID = Attribute.ID.INTERNAL_NAME
+	MULTIPLE = False
 
 # Take an integer an created it networked packed representation for the right family (ipv4/ipv6)
 def pack_int (afi,integer,mask):
@@ -181,6 +184,7 @@ class Configuration (object):
 	' split /24' \
 	' watchdog watchdog-name' \
 	' withdraw' \
+	' name what-you-want-to-remember-about-the-route' \
 	';\n'
 
 	_str_vpls_error = \
@@ -201,6 +205,7 @@ class Configuration (object):
 	'   originator-id 10.0.0.10;\n' \
 	'   cluster-list [ 10.10.0.1 10.10.0.2 ];\n' \
 	'   withdraw\n' \
+	'   name what-you-want-to-remember-about-the-route\n' \
 	'}\n'
 
 	_str_flow_error = \
@@ -307,6 +312,7 @@ class Configuration (object):
 			# withdrawn is here to not break legacy code
 			'withdraw': self._route_withdraw,
 			'withdrawn': self._route_withdraw,
+			'name': self._route_name,
 			'community': self._route_community,
 			'extended-community': self._route_extended_community,
 			'attribute': self._route_generic_attribute,
@@ -357,6 +363,7 @@ class Configuration (object):
 			'route-distinguisher': self._route_rd,
 			'withdraw': self._route_withdraw,
 			'withdrawn': self._route_withdraw,
+			'name': self._route_name,
 			'community': self._route_community,
 			'extended-community': self._route_extended_community,
 		}
@@ -446,6 +453,14 @@ class Configuration (object):
 		return result
 
 	# XXX: FIXME: move this from here to the reactor (or whatever will manage command from user later)
+	def eor_to_peers (self,family,peers):
+		result = True
+		for neighbor in self.neighbor:
+			if neighbor in peers:
+				self.neighbor[neighbor].eor.append(family)
+		return result
+
+	# XXX: FIXME: move this from here to the reactor (or whatever will manage command from user later)
 	def operational_to_peers (self,operational,peers):
 		result = True
 		for neighbor in self.neighbor:
@@ -514,7 +529,10 @@ class Configuration (object):
 	# Flow control ......................
 
 	# name is not used yet but will come really handy if we have name collision :D
-	def _dispatch (self,scope,name,multi,single):
+	def _dispatch (self,scope,name,multi,single,location=None):
+		if location:
+			self._location = location
+			self._flow_state = 'out'
 		try:
 			tokens = self.tokens()
 		except IndexError:
@@ -788,6 +806,9 @@ class Configuration (object):
 		name = tokens[0] if len(tokens) >= 1 else 'conf-only-%s' % str(time.time())[-6:]
 		self.process.setdefault(name,{})['neighbor'] = scope[-1]['peer-address'] if 'peer-address' in scope[-1] else '*'
 
+		for key in ['neighbor-changes', 'receive-notifications', 'receive-opens', 'receive-keepalives', 'receive-refresh', 'receive-updates', 'receive-operational', 'receive-parsed', 'receive-packets', 'consolidate']:
+			self.process[name][key] = scope[-1].pop(key,False)
+
 		run = scope[-1].pop('process-run','')
 		if run:
 			if len(tokens) != 1:
@@ -833,7 +854,19 @@ class Configuration (object):
 		if prg[0] != '/':
 			if prg.startswith('etc/exabgp'):
 				parts = prg.split('/')
-				path = [os.environ.get('ETC','etc'),] + parts[2:]
+				etc = os.environ.get('ETC','')
+				if not etc:
+					etc = os.environ.get('PWD','')
+				if etc:
+					p = etc.split('/')
+					if p[-1] in ('etc','sbin'):
+						p = p[:-1] + ['etc']
+					else:
+						p += ['etc']
+					etc = '/'.join(p)
+				else:
+					etc = '/etc'
+				path = [etc,] + parts[1:]
 				prg = os.path.join(*path)
 			else:
 				prg = os.path.abspath(os.path.join(os.path.dirname(self._fname),prg))
@@ -1107,6 +1140,24 @@ class Configuration (object):
 			if self.debug: raise
 			return False
 
+	# Route name
+
+	def _route_name (self,scope,tokens):
+		try:
+			w = tokens.pop(0)
+		except IndexError:
+			self._error = self._str_route_error
+			if self.debug: raise
+			return False
+
+		try:
+			scope[-1]['announce'][-1].attributes.add(Name(w))
+			return True
+		except ValueError:
+			self._error = self._str_route_error
+			if self.debug: raise
+			return False
+
 	# Group Neighbor
 
 	def _multi_group (self,scope,address):
@@ -1173,21 +1224,22 @@ class Configuration (object):
 			changes = local_scope.get('announce',[])
 			messages = local_scope.get('operational',[])
 
-		for local_scope in (scope[0],scope[-1]):
-			neighbor.api.receive_packets(local_scope.get('receive-packets',False))
-			neighbor.api.send_packets(local_scope.get('send-packets',False))
+		for name in self.process.keys():
+			process = self.process[name]
+			neighbor.api.receive_packets(process.get('receive-packets',False))
+			neighbor.api.send_packets(process.get('send-packets',False))
 
-			neighbor.api.neighbor_changes(local_scope.get('neighbor-changes',False))
-			neighbor.api.consolidate(local_scope.get('consolidate',False))
+			neighbor.api.neighbor_changes(process.get('neighbor-changes',False))
+			neighbor.api.consolidate(process.get('consolidate',False))
 
-			neighbor.api.receive_parsed(local_scope.get('receive-parsed',False))
+			neighbor.api.receive_parsed(process.get('receive-parsed',False))
 
-			neighbor.api.receive_notifications(local_scope.get('receive-notifications',False))
-			neighbor.api.receive_opens(local_scope.get('receive-opens',False))
-			neighbor.api.receive_keepalives(local_scope.get('receive-keepalives',False))
-			neighbor.api.receive_updates(local_scope.get('receive-updates',False))
-			neighbor.api.receive_refresh(local_scope.get('receive-refresh',False))
-			neighbor.api.receive_operational(local_scope.get('receive-operational',False))
+			neighbor.api.receive_notifications(process.get('receive-notifications',False))
+			neighbor.api.receive_opens(process.get('receive-opens',False))
+			neighbor.api.receive_keepalives(process.get('receive-keepalives',False))
+			neighbor.api.receive_updates(process.get('receive-updates',False))
+			neighbor.api.receive_refresh(process.get('receive-refresh',False))
+			neighbor.api.receive_operational(process.get('receive-operational',False))
 
 		if not neighbor.router_id:
 			neighbor.router_id = neighbor.local_address
@@ -1530,7 +1582,7 @@ class Configuration (object):
 				klass = MPLS
 			elif 'route-distinguisher' in tokens:
 				klass = MPLS
-			elif 'labels' in tokens:
+			elif 'label' in tokens:
 				klass = MPLS
 			else:
 				klass = Prefix

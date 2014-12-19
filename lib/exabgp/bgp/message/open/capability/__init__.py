@@ -52,10 +52,10 @@ class Capability (object):
 		return '0x' + ''.join('%02x' % ord(_) for _ in data)
 
 	@classmethod
-	def fallback_capability (cls):
+	def fallback_capability (cls, imp):
 		if cls._fallback_capability is not None:
 			raise RuntimeError('only one fallback function can be registered')
-		cls._fallback_capability = cls
+		cls._fallback_capability = imp
 
 	@classmethod
 	def register_capability (cls,capability=None):
@@ -146,10 +146,10 @@ class Capabilities (dict):
 				ap_families.append((AFI(AFI.ipv4),SAFI(SAFI.unicast)))
 			if (AFI(AFI.ipv6),SAFI(SAFI.unicast)) in families:
 				ap_families.append((AFI(AFI.ipv6),SAFI(SAFI.unicast)))
-			# if (AFI(AFI.ipv4),SAFI(SAFI.nlri_mpls)) in families:
-			# 	ap_families.append((AFI(AFI.ipv4),SAFI(SAFI.nlri_mpls)))
-			#if (AFI(AFI.ipv6),SAFI(SAFI.unicast)) in families:
-			#	ap_families.append((AFI(AFI.ipv6),SAFI(SAFI.unicast)))
+			if (AFI(AFI.ipv4),SAFI(SAFI.nlri_mpls)) in families:
+				ap_families.append((AFI(AFI.ipv4),SAFI(SAFI.nlri_mpls)))
+			if (AFI(AFI.ipv6),SAFI(SAFI.unicast)) in families:
+				ap_families.append((AFI(AFI.ipv6),SAFI(SAFI.unicast)))
 			self[Capability.ID.ADD_PATH] = AddPath(ap_families,neighbor.add_path)
 
 		if graceful:

@@ -15,6 +15,8 @@ from exabgp.bgp.message.update.nlri.nlri import NLRI
 from exabgp.bgp.message.update.nlri.cidr import CIDR
 from exabgp.bgp.message.update.nlri.qualifier.labels import Labels
 from exabgp.bgp.message.update.nlri.qualifier.rd import RouteDistinguisher
+from exabgp.bgp.message.update.nlri.qualifier.path import PathInfo
+
 
 # ====================================================== Both MPLS and Inet NLRI
 # RFC ....
@@ -23,6 +25,7 @@ class MPLS (NLRI,CIDR):
 	__slots__ = ['labels','rd','nexthop','action']
 
 	def __init__(self,afi,safi,packed,mask,nexthop,action,path=None):
+		self.path_info = PathInfo.NOPATH if path is None else path
 		self.labels = Labels.NOLABEL
 		self.rd = RouteDistinguisher.NORD
 		self.nexthop = IP.unpack(nexthop) if nexthop else NoIP
@@ -38,7 +41,7 @@ class MPLS (NLRI,CIDR):
 		return False
 
 	def extensive (self):
-		return "%s%s%s" % (self.prefix(),str(self.labels),str(self.rd))
+		return "%s%s%s%s" % (self.prefix(),str(self.labels),str(self.path_info),str(self.rd))
 
 	def __len__ (self):
 		return CIDR.__len__(self) + len(self.labels) + len(self.rd)
@@ -56,11 +59,13 @@ class MPLS (NLRI,CIDR):
 	def json (self,announced=True):
 		label = self.labels.json()
 		rdist = self.rd.json()
+		pinfo = self.path_info.json()
 
 		r = []
 		if announced:
-			if self.labels: r.append(label)
-			if self.rd: r.append(rdist)
+			if label: r.append(label)
+			if rdist: r.append(rdist)
+			if pinfo: r.append(pinfo)
 		return '"%s": { %s }' % (self.prefix(),", ".join(r))
 
 	def pack (self,addpath=None):
@@ -75,11 +80,12 @@ class MPLS (NLRI,CIDR):
 
 	@classmethod
 	def unpack (cls,afi,safi,bgp,addpath,nexthop,action):
-		labels,rd,mask,size,prefix,left = NLRI._nlri(afi,safi,bgp,action)
+		labels,rd,path_identifier,mask,size,prefix,left = NLRI._nlri(afi,safi,bgp,action,addpath)
 
 		nlri = cls(afi,safi,prefix,mask,nexthop,action)
 		if labels: nlri.labels = Labels(labels)
 		if rd: nlri.rd = RouteDistinguisher(rd)
+		if path_identifier: nlri.path_info = PathInfo(None,None,path_identifier)
 
 		return len(bgp) - len(left),nlri
 
