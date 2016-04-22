@@ -3,23 +3,27 @@
 nop.py
 
 Created by Thomas Mangin on 2009-11-06.
-Copyright (c) 2009-2013 Exa Networks. All rights reserved.
+Copyright (c) 2009-2015 Exa Networks. All rights reserved.
 """
 
-from exabgp.bgp.message import Message
+from exabgp.bgp.message.message import Message
+
+# ========================================================================= NOP
+#
+
 
 class NOP (Message):
-	ID = Message.ID.NOP
-	TYPE = chr(Message.ID.NOP)
+	ID = Message.CODE.NOP
+	TYPE = chr(Message.CODE.NOP)
 
-	def message (self):
+	def message (self,negotiated=None):
 		return self._message(self.data)
 
 	def __str__ (self):
 		return "NOP"
 
 	@classmethod
-	def unpack (cls):
+	def unpack_message (cls, data, negotiated):  # pylint: disable=W0613
 		return NOP()
 
 _NOP = NOP()

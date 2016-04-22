@@ -3,38 +3,41 @@
 unknown.py
 
 Created by Thomas Mangin on 2014-06-30.
-Copyright (c) 2009-2013 Exa Networks. All rights reserved.
+Copyright (c) 2009-2015 Exa Networks. All rights reserved.
 """
 
-from exabgp.bgp.message.open.capability import Capability
+from exabgp.bgp.message.open.capability.capability import Capability
 
 # ============================================================ UnknownCapability
 #
 
+
+@Capability.unknown
 class UnknownCapability (Capability):
-	def set (self,value,raw=''):
-		self.value = value
-		self.raw = raw
+	def set (self, capability, data=''):
+		self.capability = capability
+		self.data = data
+		return self
 
 	def __str__ (self):
-		if self.value in Capability.ID.reserved: return 'Reserved %s' % str(self.value)
-		if self.value in Capability.ID.unassigned: return 'Unassigned %s' % str(self.value)
-		return 'Unknown %s' % str(self.value)
+		if self.capability in Capability.CODE.reserved:
+			return 'Reserved %s' % str(self.capability)
+		if self.capability in Capability.CODE.unassigned:
+			return 'Unassigned %s' % str(self.capability)
+		return 'Unknown %s' % str(self.capability)
 
 	def json (self):
-		if self.value in Capability.ID.reserved:
+		if self.capability in Capability.CODE.reserved:
 			iana = 'reserved'
-		elif self.value in Capability.ID.unassigned:
+		elif self.capability in Capability.CODE.unassigned:
 			iana = 'unassigned'
 		else:
 			iana = 'unknown'
-		return '{ "name": "unknown", "iana": "%s", "value": %d, "raw": "%s" }' % (iana,self.value,self.raw)
+		return '{ "name": "unknown", "iana": "%s", "value": %d, "raw": "%s" }' % (iana,self.capability,self.data)
 
 	def extract (self):
 		return []
 
 	@staticmethod
-	def unpack (capability,instance,data):
+	def unpack_capability (instance, data, capability):
 		return instance.set(capability,data)
-
-Capability.fallback_capability(UnknownCapability)

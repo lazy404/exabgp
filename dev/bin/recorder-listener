@@ -8,20 +8,11 @@ import asyncore
 import socket
 import errno
 
-def od (value):
-	def spaced (value):
-		even = None
-		for v in value:
-			if even is False:
-				yield ' '
-			yield '%02X' % ord(v)
-			even = not even
-	return ''.join(spaced(value))
 
 class RecordHandler(asyncore.dispatcher_with_send):
 	raw = True
 
-	def setup (self,name,ip,port):
+	def setup (self, name, ip, port):
 		now = time.strftime("%a-%d-%b-%Y-%H:%M:%S", time.gmtime())
 		self.record = open("%s-%s" % (name,now),'w')
 		if not self.raw:
@@ -34,29 +25,29 @@ class RecordHandler(asyncore.dispatcher_with_send):
 			space = False
 			while True:
 				try:
-					bytes = self.recv(_read_size)
-				except socket.error, e:
-					if e.errno in (errno.EWOULDBLOCK,errno.EAGAIN):
+					data = self.recv(_read_size)
+				except socket.error,exc:
+					if exc.errno in (errno.EWOULDBLOCK,errno.EAGAIN):
 						continue
-					raise e
-				if not bytes:
+					raise exc
+				if not data:
 					print "connection closed"
 					break
 
-				if len(bytes) == _read_size:
+				if len(data) == _read_size:
 					print '.',
 				else:
-					print "%d" % len(bytes),
+					print "%d" % len(data),
 				sys.stdout.flush()
 
 				if self.raw:
-					self.record.write(bytes)
+					self.record.write(data)
 					self.record.flush()
-					if not bytes:
+					if not data:
 						break
 					continue
 
-				for byte in bytes:
+				for byte in data:
 					self.record.write('%02X' % ord(byte))
 					count = (count + 1) % 32
 					if not count:
@@ -74,7 +65,7 @@ class RecordHandler(asyncore.dispatcher_with_send):
 			self.close()
 
 class RecordServer(asyncore.dispatcher):
-	def __init__(self, host, port,name):
+	def __init__ (self, host, port, name):
 		asyncore.dispatcher.__init__(self)
 		self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
 		self.set_reuse_addr()
@@ -82,7 +73,7 @@ class RecordServer(asyncore.dispatcher):
 		self.listen(5)
 		self.name = name
 
-	def handle_accept(self):
+	def handle_accept (self):
 		pair = self.accept()
 		if pair is not None:
 			sock, (ip,port) = pair

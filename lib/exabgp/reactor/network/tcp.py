@@ -3,7 +3,7 @@
 tcp.py
 
 Created by Thomas Mangin on 2013-07-13.
-Copyright (c) 2013-2013 Exa Networks. All rights reserved.
+Copyright (c) 2013-2015 Exa Networks. All rights reserved.
 """
 
 import time
@@ -20,14 +20,15 @@ from exabgp.protocol.ip import IP
 from exabgp.reactor.network.error import errno
 from exabgp.reactor.network.error import error
 
-from .error import NotConnected
-from .error import BindingError
-from .error import MD5Error
-from .error import NagleError
-from .error import TTLError
-from .error import AsyncError
+from exabgp.reactor.network.error import NotConnected
+from exabgp.reactor.network.error import BindingError
+from exabgp.reactor.network.error import MD5Error
+from exabgp.reactor.network.error import NagleError
+from exabgp.reactor.network.error import TTLError
+from exabgp.reactor.network.error import AsyncError
 
 from exabgp.logger import Logger
+
 
 def create (afi):
 	try:
@@ -40,34 +41,36 @@ def create (afi):
 		except (socket.error,AttributeError):
 			pass
 		try:
-			io.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+			io.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)  # pylint: disable=E1101
 		except (socket.error,AttributeError):
 			pass
 	except socket.error:
 		raise NotConnected('Could not create socket')
 	return io
 
-def bind (io,ip,afi):
+
+def bind (io, ip, afi):
 	try:
 		if afi == AFI.ipv4:
 			io.bind((ip,0))
 		if afi == AFI.ipv6:
 			io.bind((ip,0,0,0))
-	except socket.error,e:
-		raise BindingError('Could not bind to local ip %s - %s' % (ip,str(e)))
+	except socket.error,exc:
+		raise BindingError('Could not bind to local ip %s - %s' % (ip,str(exc)))
 
-def connect (io,ip,port,afi,md5):
+
+def connect (io, ip, port, afi, md5):
 	try:
 		if afi == AFI.ipv4:
 			io.connect((ip,port))
 		if afi == AFI.ipv6:
 			io.connect((ip,port,0,0))
-	except socket.error, e:
-		if e.errno == errno.EINPROGRESS:
+	except socket.error,exc:
+		if exc.errno == errno.EINPROGRESS:
 			return
 		if md5:
-			raise NotConnected('Could not connect to peer %s:%d, check your MD5 password (%s)' % (ip,port,errstr(e)))
-		raise NotConnected('Could not connect to peer %s:%d (%s)' % (ip,port,errstr(e)))
+			raise NotConnected('Could not connect to peer %s:%d, check your MD5 password (%s)' % (ip,port,errstr(exc)))
+		raise NotConnected('Could not connect to peer %s:%d (%s)' % (ip,port,errstr(exc)))
 
 
 # http://lxr.free-electrons.com/source/include/uapi/linux/tcp.h#L197
@@ -97,7 +100,7 @@ def connect (io,ip,port,afi,md5):
 # 	/* _SS_MAXSIZE value minus size of ss_family */
 # } __attribute__ ((aligned(_K_SS_ALIGNSIZE)));   /* force desired alignment */
 
-def MD5 (io,ip,port,afi,md5):
+def MD5 (io, ip, port, md5):
 	if md5:
 		os = platform.system()
 		if os == 'FreeBSD':
@@ -129,7 +132,7 @@ def MD5 (io,ip,port,afi,md5):
 				# Do not use '!' for the pack, the network (big) endian switch in
 				# struct.pack is fighting against inet_pton and htons (note the n)
 
-				if afi == AFI.ipv4:
+				if IP.toafi(ip) == AFI.ipv4:
 					# SS_MAXSIZE is 128 but addr_family, port and ipaddr (8 bytes total) are written independently of the padding
 					SS_MAXSIZE_PADDING = 128 - calcsize('HH4s')  # 8
 					sockaddr = pack('HH4s%dx' % SS_MAXSIZE_PADDING, socket.AF_INET, n_port, n_addr)
@@ -144,31 +147,51 @@ def MD5 (io,ip,port,afi,md5):
 
 				TCP_MD5SIG = 14
 				io.setsockopt(socket.IPPROTO_TCP, TCP_MD5SIG, sockaddr + key)
-			except socket.error,e:
-				raise MD5Error('This linux machine does not support TCP_MD5SIG, you can not use MD5 (%s)' % errstr(e))
+			except socket.error,exc:
+				raise MD5Error('This linux machine does not support TCP_MD5SIG, you can not use MD5 (%s)' % errstr(exc))
 		else:
 			raise MD5Error('ExaBGP has no MD5 support for %s' % os)
 
-def nagle (io,ip):
+
+def nagle (io, ip):
 	try:
 		# diable Nagle's algorithm (no grouping of packets)
 		io.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 	except (socket.error,AttributeError):
 		raise NagleError("Could not disable nagle's algorithm for %s" % ip)
 
-def TTL (io,ip,ttl):
+
+def TTL (io, ip, ttl):
 	# None (ttl-security unset) or zero (maximum TTL) is the same thing
 	if ttl:
 		try:
-			io.setsockopt(socket.IPPROTO_IP,socket.IP_TTL, 20)
-		except socket.error,e:
-			raise TTLError('This OS does not support IP_TTL (ttl-security) for %s (%s)' % (ip,errstr(e)))
+			io.setsockopt(socket.IPPROTO_IP, socket.IP_TTL, ttl)
+		except socket.error,exc:
+			raise TTLError('This OS does not support IP_TTL (ttl-security) for %s (%s)' % (ip,errstr(exc)))
 
-def async (io,ip):
+
+def MIN_TTL (io, ip, ttl):
+	# None (ttl-security unset) or zero (maximum TTL) is the same thing
+	if ttl:
+		try:
+			io.setsockopt(socket.IPPROTO_IP, socket.IP_MINTTL, ttl)
+		except socket.error,exc:
+			raise TTLError('This OS does not support IP_MINTTL (ttl-security) for %s (%s)' % (ip,errstr(exc)))
+		except AttributeError:
+			pass
+
+		try:
+			io.setsockopt(socket.IPPROTO_IP, socket.IP_TTL, ttl)
+		except socket.error,exc:
+			raise TTLError('This OS does not support IP_MINTTL or IP_TTL (ttl-security) for %s (%s)' % (ip,errstr(exc)))
+
+
+def async (io, ip):
 	try:
 		io.setblocking(0)
-	except socket.error, e:
-		raise AsyncError('could not set socket non-blocking for %s (%s)' % (ip,errstr(e)))
+	except socket.error,exc:
+		raise AsyncError('could not set socket non-blocking for %s (%s)' % (ip,errstr(exc)))
+
 
 def ready (io):
 	logger = Logger()
@@ -199,13 +222,3 @@ def ready (io):
 		except select.error:
 			yield False
 			return
-
-# try:
-# 	try:
-# 		# Linux / Windows
-# 		self.message_size = io.getsockopt(socket.SOL_SOCKET, socket.SO_MAX_MSG_SIZE)
-# 	except AttributeError:
-# 		# BSD
-# 		self.message_size = io.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF)
-# except socket.error, e:
-# 	self.message_size = None

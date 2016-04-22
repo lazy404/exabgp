@@ -3,7 +3,7 @@
 attribute.py
 
 Created by Thomas Mangin on 2009-11-05.
-Copyright (c) 2009-2013 Exa Networks. All rights reserved.
+Copyright (c) 2009-2015 Exa Networks. All rights reserved.
 """
 
 from struct import pack
@@ -12,17 +12,19 @@ from exabgp.bgp.message.notification import Notify
 
 from exabgp.util.cache import Cache
 
+
 # ==================================================================== Attribute
 #
 
 class Attribute (object):
 	# we need to define ID and FLAG inside of the subclasses
-	# otherwise we can not dynamically create different GenericAttribute
-	# ID   = 0x00
-	# FLAG = 0x00
+	ID   = 0x00
+	FLAG = 0x00
 
 	# Should this Attribute be cached
 	CACHING = False
+	# Generic Class or implementation
+	GENERIC = False
 
 	# Registered subclasses we know how to decode
 	registered_attributes = dict()
@@ -40,9 +42,9 @@ class Attribute (object):
 
 	# ---------------------------------------------------------------------------
 
-	# XXX : FIXME : The API of ID is a bit different (it can be instanciated)
-	# XXX : FIXME : This is legacy. should we change to not be ?
-	class ID (int):
+	# XXX: FIXME: The API of ID is a bit different (it can be instanciated)
+	# XXX: FIXME: This is legacy. should we change to not be ?
+	class CODE (int):
 		__slots__ = []
 
 		# This should move within the classes and not be here
@@ -79,38 +81,38 @@ class Attribute (object):
 		INTERNAL_SPLIT     = 0xFFFF
 
 		names = {
-			0x01: 'origin',
-			0x02: 'as-path',
-			0x03: 'next-hop',
-			0x04: 'med',
-	#		0x04: 'multi-exit-disc',
-			0x05: 'local-preference',
-			0x06: 'atomic-aggregate',
-			0x07: 'aggregator',
-			0x08: 'community',
-			0x09: 'originator-id',
-			0x0a: 'cluster-list',
-			0x0e: 'mp-reach-nlri',
-			0x0f: 'mp-unreach-nlri',
-	#		0x0e: 'multi-protocol reacheable nlri'
-	#		0x0f: 'multi-protocol unreacheable nlri'
-			0x10: 'extended-community',
-			0x11: 'as4-path',
-			0x12: 'as4-aggregator',
-			0x16: 'pmsi-tunnel',
-			0x17: 'tunnel-encaps',
-			0x1a: 'aigp',
-			0xfffc: 'internal-name',
-			0xfffd: 'internal-withdraw',
-			0xfffe: 'internal-watchdog',
-			0xffff: 'internal-split',
+			ORIGIN:             'origin',
+			AS_PATH:            'as-path',
+			NEXT_HOP:           'next-hop',
+			MED:                'med',              # multi-exit-disc
+			LOCAL_PREF:         'local-preference',
+			ATOMIC_AGGREGATE:   'atomic-aggregate',
+			AGGREGATOR:         'aggregator',
+			COMMUNITY:          'community',
+			ORIGINATOR_ID:      'originator-id',
+			CLUSTER_LIST:       'cluster-list',
+			MP_REACH_NLRI:      'mp-reach-nlri',    # multi-protocol reacheable nlri
+			MP_UNREACH_NLRI:    'mp-unreach-nlri',  # multi-protocol unreacheable nlri
+			EXTENDED_COMMUNITY: 'extended-community',
+			AS4_PATH:           'as4-path',
+			AS4_AGGREGATOR:     'as4-aggregator',
+			PMSI_TUNNEL:        'pmsi-tunnel',
+			TUNNEL_ENCAP:       'tunnel-encaps',
+			AIGP:               'aigp',
+			0xfffc:             'internal-name',
+			0xfffd:             'internal-withdraw',
+			0xfffe:             'internal-watchdog',
+			0xffff:             'internal-split',
 		}
 
-		def __str__ (self):
+		def __repr__ (self):
 			return self.names.get(self,'unknown-attribute-%s' % hex(self))
 
+		def __str__ (self):
+			return repr(self)
+
 		@classmethod
-		def name (cls,self):
+		def name (cls, self):
 			return cls.names.get(self,'unknown-attribute-%s' % hex(self))
 
 	# ---------------------------------------------------------------------------
@@ -120,6 +122,11 @@ class Attribute (object):
 		PARTIAL         = 0x20  # .  32 - 0010 0000
 		TRANSITIVE      = 0x40  # .  64 - 0100 0000
 		OPTIONAL        = 0x80  # . 128 - 1000 0000
+
+		MASK_EXTENDED   = 0xEF  # . 239 - 1110 1111
+		MASK_PARTIAL    = 0xDF  # . 223 - 1101 1111
+		MASK_TRANSITIVE = 0xBF  # . 191 - 1011 1111
+		MASK_OPTIONAL   = 0x7F  # . 127 - 0111 1111
 
 		__slots__ = []
 
@@ -142,12 +149,12 @@ class Attribute (object):
 				r.append("UNKNOWN %s" % hex(v))
 			return " ".join(r)
 
-		def matches (self,value):
+		def matches (self, value):
 			return self | 0x10 == value | 0x10
 
 	# ---------------------------------------------------------------------------
 
-	def _attribute (self,value):
+	def _attribute (self, value):
 		flag = self.FLAG
 		if flag & Attribute.Flag.OPTIONAL and not value:
 			return ''
@@ -160,45 +167,66 @@ class Attribute (object):
 			len_value = chr(length)
 		return "%s%s%s%s" % (chr(flag),chr(self.ID),len_value,value)
 
-	def __eq__ (self,other):
-		return self.ID == other.ID
+	def _len (self,value):
+		length = len(value)
+		return length + 3 if length <= 0xFF else length + 4
 
-	def __ne__ (self,other):
-		return self.ID != other.ID
+	def __eq__ (self, other):
+		return \
+			self.ID == other.ID and \
+			self.FLAG == other.FLAG
+
+	def __ne__ (self, other):
+		return not self.__eq__(other)
+
+	def __lt__ (self, other):
+		return self.ID < other.ID
+
+	def __le__ (self, other):
+		return self.ID <= other.ID
+
+	def __gt__ (self, other):
+		return self.ID > other.ID
+
+	def __ge__ (self, other):
+		return self.ID >= other.ID
 
 	@classmethod
-	def register_attribute (cls,attribute_id=None,flag=None):
-		aid = cls.ID if attribute_id is None else attribute_id
-		flg = cls.FLAG | Attribute.Flag.EXTENDED_LENGTH if flag is None else flag | Attribute.Flag.EXTENDED_LENGTH
-		if (aid,flg) in cls.registered_attributes:
-			raise RuntimeError('only one class can be registered per capability')
-		cls.registered_attributes[(aid,flg)] = cls
-		cls.attributes_known.append(aid)
-		if cls.FLAG & Attribute.Flag.OPTIONAL:
-			Attribute.attributes_optional.append(aid)
-		else:
-			Attribute.attributes_well_know.append(aid)
+	def register (cls,attribute_id=None,flag=None):
+		def register_attribute (klass):
+			aid = klass.ID if attribute_id is None else attribute_id
+			flg = klass.FLAG | Attribute.Flag.EXTENDED_LENGTH if flag is None else flag | Attribute.Flag.EXTENDED_LENGTH
+			if (aid,flg) in cls.registered_attributes:
+				raise RuntimeError('only one class can be registered per attribute')
+			cls.registered_attributes[(aid,flg)] = klass
+			cls.attributes_known.append(aid)
+			if klass.FLAG & Attribute.Flag.OPTIONAL:
+				cls.attributes_optional.append(aid)
+			else:
+				cls.attributes_well_know.append(aid)
+			return klass
+		return register_attribute
 
 	@classmethod
-	def registered (cls,attribute_id,flag):
+	def registered (cls, attribute_id, flag):
 		return (attribute_id,flag | Attribute.Flag.EXTENDED_LENGTH) in cls.registered_attributes
 
 	@classmethod
-	def klass (cls,attribute_id,flag):
+	def klass (cls, attribute_id, flag):
 		key = (attribute_id,flag | Attribute.Flag.EXTENDED_LENGTH)
 		if key in cls.registered_attributes:
 			kls = cls.registered_attributes[key]
 			kls.ID = attribute_id
 			return kls
 		# XXX: we do see some AS4_PATH with the partial instead of transitive bit set !!
-		if attribute_id == Attribute.ID.AS4_PATH:
+		if attribute_id == Attribute.CODE.AS4_PATH:
 			kls = cls.attributes_known[attribute_id]
 			kls.ID = attribute_id
 			return kls
 		raise Notify (2,4,'can not handle attribute id %s' % attribute_id)
 
 	@classmethod
-	def unpack (cls,attribute_id,flag,data,negotiated):
+	def unpack (cls, attribute_id, flag, data, negotiated):
 		cache = cls.caching and cls.CACHING
 
 		if cache and data in cls.cache.get(cls.ID,{}):
@@ -209,7 +237,7 @@ class Attribute (object):
 			instance = cls.klass(attribute_id,flag).unpack(data,negotiated)
 
 			if cache:
-				cls.cache.cache[cls.ID].cache(data,instance)
+				cls.cache[cls.ID].cache(data,instance)
 			return instance
 
 		raise Notify (2,4,'can not handle attribute id %s' % attribute_id)
@@ -217,7 +245,7 @@ class Attribute (object):
 	@classmethod
 	def setCache (cls):
 		if not cls.cache:
-			for attribute in Attribute.ID.names:
+			for attribute in Attribute.CODE.names:
 				if attribute not in cls.cache:
 					cls.cache[attribute] = Cache()
 

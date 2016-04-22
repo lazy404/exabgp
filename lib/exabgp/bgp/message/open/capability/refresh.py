@@ -3,43 +3,69 @@
 refresh.py
 
 Created by Thomas Mangin on 2012-07-17.
-Copyright (c) 2009-2013 Exa Networks. All rights reserved.
+Copyright (c) 2009-2015 Exa Networks. All rights reserved.
 """
 
-from exabgp.bgp.message.open.capability import Capability
+from exabgp.bgp.message.open.capability.capability import Capability
 
 # ================================================================= RouteRefresh
 #
 
+
+class REFRESH (object):
+	ABSENT   = 0x01
+	NORMAL   = 0x02
+	ENHANCED = 0x04
+
+
+@Capability.register()
+@Capability.register(Capability.CODE.ROUTE_REFRESH_CISCO)
 class RouteRefresh (Capability):
-	def __init__ (self):
-		self.ID = Capability.ID.ROUTE_REFRESH
+	ID = Capability.CODE.ROUTE_REFRESH
 
 	def __str__ (self):
-		if self.ID == Capability.ID.ROUTE_REFRESH:
+		if self.ID == Capability.CODE.ROUTE_REFRESH:
 			return 'Route Refresh'
 		return 'Cisco Route Refresh'
 
 	def json (self):
-		return '{ "name": "route-refresh", "variant": "%s" }' % ('RFC' if self.ID == Capability.ID.ROUTE_REFRESH else 'Cisco')
+		return '{ "name": "route-refresh", "variant": "%s" }' % ('RFC' if self.ID == Capability.CODE.ROUTE_REFRESH else 'Cisco')
 
 	def extract (self):
 		return ['']
 
 	@staticmethod
-	def unpack (capability,instance,data):
+	def unpack_capability (instance, data, capability=None):  # pylint: disable=W0613
 		# XXX: FIXME: we should set that that instance was seen and raise if seen twice
 		return instance
 
-RouteRefresh.register_capability(Capability.ID.ROUTE_REFRESH)
-RouteRefresh.register_capability(Capability.ID.ROUTE_REFRESH_CISCO)
+	def __eq__ (self, other):
+		if not isinstance(other,RouteRefresh):
+			return False
+		return self.ID == other.ID
 
+	def __ne__ (self, other):
+		return not self.__eq__(other)
+
+	def __lt__ (self, other):
+		raise RuntimeError('comparing RouteRefresh for ordering does not make sense')
+
+	def __le__ (self, other):
+		raise RuntimeError('comparing RouteRefresh for ordering does not make sense')
+
+	def __gt__ (self, other):
+		raise RuntimeError('comparing RouteRefresh for ordering does not make sense')
+
+	def __ge__ (self, other):
+		raise RuntimeError('comparing RouteRefresh for ordering does not make sense')
 
 # ========================================================= EnhancedRouteRefresh
 #
 
+
+@Capability.register()
 class EnhancedRouteRefresh (Capability):
-	ID = Capability.ID.ENHANCED_ROUTE_REFRESH
+	ID = Capability.CODE.ENHANCED_ROUTE_REFRESH
 
 	def __str__ (self):
 		return 'Enhanced Route Refresh'
@@ -51,8 +77,6 @@ class EnhancedRouteRefresh (Capability):
 		return ['']
 
 	@staticmethod
-	def unpack (capability,instance,data):
+	def unpack_capability (instance, data, capability=None):  # pylint: disable=W0613
 		# XXX: FIXME: we should set that that instance was seen and raise if seen twice
 		return instance
-
-EnhancedRouteRefresh.register_capability()

@@ -8,13 +8,14 @@ from .tcp import async
 from .tcp import ready
 from .error import NetworkError
 
+
 class Outgoing (Connection):
 	direction = 'outgoing'
 
-	def __init__ (self,afi,peer,local,port=179,md5='',ttl=None):
+	def __init__ (self, afi, peer, local, port=179,md5='',ttl=None):
 		Connection.__init__(self,afi,peer,local)
 
-		self.logger.wire("Attempting connection to %s" % self.peer)
+		self.logger.wire("attempting connection to %s:%d" % (self.peer,port))
 
 		self.peer = peer
 		self.ttl = ttl
@@ -24,15 +25,16 @@ class Outgoing (Connection):
 
 		try:
 			self.io = create(afi)
-			MD5(self.io,peer,port,afi,md5)
+			MD5(self.io,peer,port,md5)
+			TTL(self.io, peer, self.ttl)
 			bind(self.io,local,afi)
 			async(self.io,peer)
 			connect(self.io,peer,port,afi,md5)
 			self.init = True
-		except NetworkError,e:
+		except NetworkError,exc:
 			self.init = False
 			self.close()
-			self.logger.wire("Connection failed, %s" % str(e))
+			self.logger.wire("connection to %s:%d failed, %s" % (self.peer,port,str(exc)))
 
 	def establish (self):
 		if not self.init:
@@ -54,5 +56,5 @@ class Outgoing (Connection):
 			return
 
 		nagle(self.io,self.peer)
-		TTL(self.io,self.peer,self.ttl)
+		# Not working after connect() at least on FreeBSD TTL(self.io,self.peer,self.ttl)
 		yield True

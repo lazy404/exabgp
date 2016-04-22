@@ -3,29 +3,34 @@
 protocol.py
 
 Created by Thomas Mangin on 2009-08-25.
-Copyright (c) 2009-2013 Exa Networks. All rights reserved.
+Copyright (c) 2009-2015 Exa Networks. All rights reserved.
 """
 
 import os
 
+import traceback
+
+# ================================================================ Registration
+#
+
 from exabgp.reactor.network.outgoing import Outgoing
-#from exabgp.reactor.network.error import NotifyError
+# from exabgp.reactor.network.error import NotifyError
 
 from exabgp.protocol.family import AFI
 from exabgp.protocol.family import SAFI
 from exabgp.bgp.message import Message
-from exabgp.bgp.message.nop import NOP
-from exabgp.bgp.message.nop import _NOP
-from exabgp.bgp.message.open import Open
-from exabgp.bgp.message.open.capability import Capability
+from exabgp.bgp.message import NOP
+from exabgp.bgp.message import _NOP
+from exabgp.bgp.message import Open
+from exabgp.bgp.message.open import Version
 from exabgp.bgp.message.open.capability import Capabilities
-from exabgp.bgp.message.open.capability.negotiated import Negotiated
-from exabgp.bgp.message.update import Update
-from exabgp.bgp.message.update import EOR
-from exabgp.bgp.message.keepalive import KeepAlive
-from exabgp.bgp.message.notification import Notification
-from exabgp.bgp.message.notification import Notify
-from exabgp.bgp.message.operational import Operational
+from exabgp.bgp.message.open.capability import Negotiated
+from exabgp.bgp.message import Update
+from exabgp.bgp.message import EOR
+from exabgp.bgp.message import KeepAlive
+from exabgp.bgp.message import Notification
+from exabgp.bgp.message import Notify
+from exabgp.bgp.message import Operational
 
 from exabgp.reactor.api.processes import ProcessError
 
@@ -42,7 +47,7 @@ _OPERATIONAL = Operational(0x00)
 class Protocol (object):
 	decode = True
 
-	def __init__ (self,peer):
+	def __init__ (self, peer):
 		try:
 			self.logger = Logger()
 		except RuntimeError:
@@ -51,8 +56,15 @@ class Protocol (object):
 		self.neighbor = peer.neighbor
 		self.negotiated = Negotiated(self.neighbor)
 		self.connection = None
-		port = os.environ.get('exabgp.tcp.port','') or os.environ.get('exabgp_tcp_port','')
-		self.port = int(port) if port.isdigit() else 179
+
+		if self.neighbor.connect:
+			self.port = self.neighbor.connect
+		elif os.environ.get('exabgp.tcp.port','').isdigit():
+			self.port = int(os.environ.get('exabgp.tcp.port'))
+		elif os.environ.get('exabgp_tcp_port','').isdigit():
+			self.port = int(os.environ.get('exabgp_tcp_port'))
+		else:
+			self.port = 179
 
 		# XXX: FIXME: check the the -19 is correct (but it is harmless)
 		# The message size is the whole BGP message _without_ headers
@@ -66,14 +78,14 @@ class Protocol (object):
 	def __del__ (self):
 		self.close('automatic protocol cleanup')
 
-	def me (self,message):
+	def me (self, message):
 		return "Peer %15s ASN %-7s %s" % (self.peer.neighbor.peer_address,self.peer.neighbor.peer_as,message)
 
-	def accept (self,incoming):
+	def accept (self, incoming):
 		self.connection = incoming
 
 		if self.peer.neighbor.api['neighbor-changes']:
-			self.peer.reactor.processes.connected(self.peer)
+			self.peer.reactor.processes.connected(self.peer.neighbor)
 
 		# very important - as we use this function on __init__
 		return self
@@ -81,11 +93,11 @@ class Protocol (object):
 	def connect (self):
 		# allows to test the protocol code using modified StringIO with a extra 'pending' function
 		if not self.connection:
+			local = self.neighbor.md5_ip
 			peer = self.neighbor.peer_address
-			local = self.neighbor.local_address
-			md5 = self.neighbor.md5
-			ttl = self.neighbor.ttl
-			self.connection = Outgoing(peer.afi,peer.ip,local.ip,self.port,md5,ttl)
+			md5 = self.neighbor.md5_password
+			ttl_out = self.neighbor.ttl_out
+			self.connection = Outgoing(peer.afi,peer.top(),local.top(),self.port,md5,ttl_out)
 
 			try:
 				generator = self.connection.establish()
@@ -95,7 +107,7 @@ class Protocol (object):
 						yield False
 						continue
 					if self.peer.neighbor.api['neighbor-changes']:
-						self.peer.reactor.processes.connected(self.peer)
+						self.peer.reactor.processes.connected(self.peer.neighbor)
 					yield True
 					return
 			except StopIteration:
@@ -104,7 +116,7 @@ class Protocol (object):
 				yield False
 				return
 
-	def close (self,reason='protocol closed, reason unspecified'):
+	def close (self, reason='protocol closed, reason unspecified'):
 		if self.connection:
 			self.logger.network(self.me(reason))
 
@@ -114,66 +126,112 @@ class Protocol (object):
 
 			try:
 				if self.peer.neighbor.api['neighbor-changes']:
-					self.peer.reactor.processes.down(self.peer,reason)
+					self.peer.reactor.processes.down(self.peer.neighbor,reason)
 			except ProcessError:
 				self.logger.message(self.me('could not send notification of neighbor close to API'))
 
+	def _to_api (self,direction,message,raw):
+		packets = self.neighbor.api['%s-packets' % direction]
+		parsed = self.neighbor.api['%s-parsed' % direction]
+		consolidate = self.neighbor.api['%s-consolidate' % direction]
 
-	def write (self,message):
-		if self.neighbor.api['send-packets'] and not self.neighbor.api['consolidate']:
-			self.peer.reactor.processes.send(self.peer,ord(message[18]),message[:19],message[19:])
-		for boolean in self.connection.writer(message):
+		if consolidate:
+			if packets:
+				self.peer.reactor.processes.message(self.peer.neighbor,direction,message,raw[:19],raw[19:])
+			else:
+				self.peer.reactor.processes.message(self.peer.neighbor,direction,message,'','')
+		else:
+			if packets:
+				self.peer.reactor.processes.packets(self.peer.neighbor,direction,int(message.ID),raw[:19],raw[19:])
+			if parsed:
+				self.peer.reactor.processes.message(message.ID,self.peer.neighbor,direction,message,'','')
+
+	def write (self, message, negotiated=None):
+		raw = message.message(negotiated)
+
+		if self.neighbor.api.get('send-%s' % Message.CODE.short(message.ID),False):
+			self._to_api('send',message,raw)
+
+		for boolean in self.connection.writer(raw):
+			yield boolean
+
+	def send (self,raw):
+		if self.neighbor.api.get('send-%s' % Message.CODE.short(ord(raw[19])),False):
+			message = Update.unpack_message(raw[19:],self.negotiated)
+			self._to_api('send',message,raw)
+
+		for boolean in self.connection.writer(raw):
 			yield boolean
 
 	# Read from network .......................................................
 
 	def read_message (self):
-		for length,msg,header,body,notify in self.connection.reader():
+		# This will always be defined by the loop but scope leaking upset scrutinizer/pylint
+		msg_id = None
+
+		packets = self.neighbor.api['receive-packets']
+		consolidate = self.neighbor.api['receive-consolidate']
+		parsed = self.neighbor.api['receive-parsed']
+
+		body,header = '',''  # just because pylint/pylama are getting more clever
+
+		for length,msg_id,header,body,notify in self.connection.reader():
+			# internal issue
 			if notify:
-				if self.neighbor.api['receive-packets']:
-					self.peer.reactor.processes.receive(self.peer,msg,header,body)
-				if self.neighbor.api[Message.ID.NOTIFICATION]:
-					self.peer.reactor.processes.notification(self.peer,notify.code,notify.subcode,str(notify))
+				if self.neighbor.api.get('send-%s' % Message.CODE.NOTIFICATION.SHORT,False):
+					if consolidate:
+						self.peer.reactor.processes.notification(self.peer.neighbor,'send',notify.code,notify.subcode,str(notify),header,body)
+					elif parsed:
+						self.peer.reactor.processes.notification(self.peer.neighbor,'send',notify.code,notify.subcode,str(notify),'','')
+					elif packets:
+						self.peer.reactor.processes.packets(self.peer.neighbor,'send',msg_id,header,body)
 				# XXX: is notify not already Notify class ?
 				raise Notify(notify.code,notify.subcode,str(notify))
+
 			if not length:
 				yield _NOP
+				continue
 
-		if self.neighbor.api['receive-packets'] and not self.neighbor.api['consolidate']:
-			self.peer.reactor.processes.receive(self.peer,msg,header,body)
+			self.logger.message(self.me('<< %s' % Message.CODE.name(msg_id)))
 
-		if msg == Message.ID.UPDATE and not self.neighbor.api['receive-parsed'] and not self.log_routes:
-			yield _UPDATE
-			return
+			for_api = self.neighbor.api.get('receive-%s' % Message.CODE.short(msg_id),False)
 
-		self.logger.message(self.me('<< %s' % Message.ID.name(msg)))
-		try:
-			message = Message.unpack_message(msg,body,self.negotiated)
-		except (KeyboardInterrupt,SystemExit,Notify):
-			raise
-		except Exception,e:
-			self.logger.message(self.me('Could not decode message %s' % Capability.hex(msg)))
-			self.logger.message(self.me('%s' % str(e)))
-			raise Notify(2,0,'can not decode update message %s' % Capability.hex(msg))
+			if for_api and packets and not consolidate:
+				self.peer.reactor.processes.packets(self.peer.neighbor,'receive',msg_id,header,body)
 
-		if message.TYPE == Notification.TYPE:
-			raise message
+			if msg_id == Message.CODE.UPDATE:
+				if not (for_api or self.log_routes) and not (parsed or consolidate):
+					yield _UPDATE
+					return
 
-		if self.neighbor.api[msg]:
-			if self.neighbor.api['receive-parsed']:
-				if self.neighbor.api['consolidate'] and self.neighbor.api['receive-packets']:
-					self.peer.reactor.processes.message(msg,self.peer,message,header,body)
-				else:
-					self.peer.reactor.processes.message(msg,self.peer,message,'','')
+			try:
+				message = Message.unpack(msg_id,body,self.negotiated)
+			except (KeyboardInterrupt,SystemExit,Notify):
+				raise
+			except Exception,exc:
+				self.logger.message(self.me('Could not decode message "%d"' % msg_id))
+				self.logger.message(self.me('%s' % str(exc)))
+				self.logger.message(traceback.format_exc())
+				raise Notify(1,0,'can not decode update message of type "%d"' % msg_id)
+				# raise Notify(5,0,'unknown message received')
 
-		yield message
+			if for_api:
+				if consolidate:
+					self.peer.reactor.processes.message(msg_id,self.neighbor,'receive',message,header,body)
+				elif parsed:
+					self.peer.reactor.processes.message(msg_id,self.neighbor,'receive',message,'','')
 
-		return
-		# XXX: FIXME: check it is well 2,4
-		raise Notify(2,4,'unknown message received')
+			try:
+				if message.TYPE == Notification.TYPE:
+					raise message
+			except:
+				import pdb; pdb.set_trace()
+				pass
 
-		# elif msg == Message.ID.ROUTE_REFRESH:
-		# 	if self.negotiated.refresh != REFRESH.absent:
+			yield message
+
+		# elif msg == Message.CODE.ROUTE_REFRESH:
+		# 	if self.negotiated.refresh != REFRESH.ABSENT:
 		# 		self.logger.message(self.me('<< ROUTE-REFRESH'))
 		# 		refresh = RouteRefresh.unpack_message(body,self.negotiated)
 		# 		if self.neighbor.api.receive_refresh:
@@ -188,13 +246,12 @@ class Protocol (object):
 		# 		refresh = UnknownMessage.unpack_message(body,self.negotiated)
 		# 	yield refresh
 
-
 	def validate_open (self):
 		error = self.negotiated.validate(self.neighbor)
 		if error is not None:
 			raise Notify(*error)
 
-	def read_open (self,ip):
+	def read_open (self, ip):
 		for received_open in self.read_message():
 			if received_open.TYPE == NOP.TYPE:
 				yield received_open
@@ -223,42 +280,34 @@ class Protocol (object):
 	# Sending message to peer
 	#
 
-	def new_open (self,restarted):
+	def new_open (self, restarted):
 		sent_open = Open(
-			4,
+			Version(4),
 			self.neighbor.local_as,
-			self.neighbor.router_id.ip,
-			Capabilities().new(self.neighbor,restarted),
-			self.neighbor.hold_time
+			self.neighbor.hold_time,
+			self.neighbor.router_id,
+			Capabilities().new(self.neighbor,restarted)
 		)
 
 		# we do not buffer open message in purpose
-		msg_send = sent_open.message()
-		for _ in self.write(msg_send):
+		for _ in self.write(sent_open):
 			yield _NOP
 
 		self.logger.message(self.me('>> %s' % sent_open))
-		if self.neighbor.api[Message.ID.OPEN]:
-			if self.neighbor.api['consolidate']:
-				header = msg_send[0:38]
-				body = msg_send[38:]
-				self.peer.reactor.processes.message(Message.ID.OPEN,self.peer,sent_open,header,body,'sent')
-			else:
-				self.peer.reactor.processes.message(Message.ID.OPEN,self.peer,sent_open,'','','sent')
 		yield sent_open
 
-	def new_keepalive (self,comment=''):
+	def new_keepalive (self, comment=''):
 		keepalive = KeepAlive()
 
-		for _ in self.write(keepalive.message()):
+		for _ in self.write(keepalive):
 			yield _NOP
 
 		self.logger.message(self.me('>> KEEPALIVE%s' % (' (%s)' % comment if comment else '')))
 
 		yield keepalive
 
-	def new_notification (self,notification):
-		for _ in self.write(notification.message()):
+	def new_notification (self, notification):
+		for _ in self.write(notification):
 			yield _NOP
 		self.logger.message(self.me('>> NOTIFICATION (%d,%d,"%s")' % (notification.code,notification.subcode,notification.data)))
 		yield notification
@@ -269,21 +318,21 @@ class Protocol (object):
 		for update in updates:
 			for message in update.messages(self.negotiated):
 				number += 1
-				for boolean in self.write(message):
+				for boolean in self.send(message):
 					# boolean is a transient network error we already announced
 					yield _NOP
 		if number:
 			self.logger.message(self.me('>> %d UPDATE(s)' % number))
 		yield _UPDATE
 
-	def new_eor (self,afi,safi):
+	def new_eor (self, afi, safi):
 		eor = EOR(afi,safi)
-		for _ in self.write(eor.message()):
+		for _ in self.write(eor):
 			yield _NOP
 		self.logger.message(self.me('>> EOR %s %s' % (afi,safi)))
 		yield eor
 
-	def new_eors (self,afi=AFI.undefined,safi=SAFI.undefined):
+	def new_eors (self, afi=AFI.undefined,safi=SAFI.undefined):
 		# Send EOR to let our peer know he can perform a RIB update
 		if self.negotiated.families:
 			families = self.negotiated.families if (afi,safi) == (AFI.undefined,SAFI.undefined) else [(afi,safi),]
@@ -298,15 +347,14 @@ class Protocol (object):
 				yield _NOP
 			yield _UPDATE
 
-	def new_operational (self,operational,negotiated):
-		for _ in self.write(operational.message(negotiated)):
+	def new_operational (self, operational, negotiated):
+		for _ in self.write(operational,negotiated):
 			yield _NOP
 		self.logger.message(self.me('>> OPERATIONAL %s' % str(operational)))
 		yield operational
 
-	def new_refresh (self,refresh,negotiated):
-		for refresh in refresh.messages(negotiated):
-			for _ in self.write(refresh):
-				yield _NOP
-			self.logger.message(self.me('>> REFRESH %s' % str(refresh)))
-			yield refresh
+	def new_refresh (self, refresh):
+		for _ in self.write(refresh,None):
+			yield _NOP
+		self.logger.message(self.me('>> REFRESH %s' % str(refresh)))
+		yield refresh

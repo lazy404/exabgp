@@ -3,7 +3,7 @@
 segment.py
 
 Created by Thomas Mangin on 2014-06-27.
-Copyright (c) 2014-2014 Exa Networks. All rights reserved.
+Copyright (c) 2014-2015 Exa Networks. All rights reserved.
 """
 
 # from struct import pack
@@ -18,8 +18,6 @@ Copyright (c) 2014-2014 Exa Networks. All rights reserved.
 
 from exabgp.bgp.message.update.nlri.evpn.nlri import EVPN
 
-# ===================================================================== EVPNNLRI
-
 # +---------------------------------------+
 # |      RD   (8 octets)                  |
 # +---------------------------------------+
@@ -31,10 +29,13 @@ from exabgp.bgp.message.update.nlri.evpn.nlri import EVPN
 # |          (4 or 16 octets)             |
 # +---------------------------------------+
 
+# ===================================================================== EVPNNLRI
+
+
 class EthernetSegment (EVPN):
 	CODE = 1
 	NAME = "Ethernet Segment"
 	SHORT_NAME = "Segment"
 
-	def __init__ (**args):
+	def __init__ (self, **args):
 		raise Exception('unimplemented')

@@ -3,7 +3,7 @@
 aspath.py
 
 Created by Thomas Mangin on 2009-11-05.
-Copyright (c) 2009-2013 Exa Networks. All rights reserved.
+Copyright (c) 2009-2015 Exa Networks. All rights reserved.
 """
 
 from struct import unpack
@@ -14,9 +14,11 @@ from exabgp.bgp.message.open.asn import AS_TRANS
 from exabgp.bgp.message.update.attribute.attribute import Attribute
 from exabgp.bgp.message.notification import Notify
 
+
 # =================================================================== ASPath (2)
 # only 2-4% of duplicated data therefore it is not worth to cache
 
+@Attribute.register()
 class ASPath (Attribute):
 	AS_SET             = 0x01
 	AS_SEQUENCE        = 0x02
@@ -24,77 +26,76 @@ class ASPath (Attribute):
 	AS_CONFED_SET      = 0x04
 	ASN4               = False
 
-	ID = Attribute.ID.AS_PATH
+	ID = Attribute.CODE.AS_PATH
 	FLAG = Attribute.Flag.TRANSITIVE
-	MULTIPLE = False
 
-	__slots__ = ['as_seq','as_set','as_cseq','as_cset','segments','packed','index','_str','_json']
+	__slots__ = ['as_seq','as_set','as_cseq','as_cset','segments','_packed','index','_str','_json']
 
-	def __init__ (self,as_sequence,as_set,as_conf_sequence=[],as_conf_set=[],index=None):
+	def __init__ (self, as_sequence, as_set, as_conf_sequence=None,as_conf_set=None,index=None):
 		self.as_seq = as_sequence
 		self.as_set = as_set
-		self.as_cseq = as_conf_sequence
-		self.as_cset = as_conf_set
+		self.as_cseq = as_conf_sequence if as_conf_sequence is not None else []
+		self.as_cset = as_conf_set if as_conf_set is not None else []
 		self.segments = ''
-		self.packed = {True:'',False:''}
+		self._packed = {True:'',False:''}
 		self.index = index  # the original packed data, use for indexing
 		self._str = ''
 		self._json = {}
 
-	def __cmp__(self,other):
-		if not isinstance(other, self.__class__):
-			return -1
-		if self.ASN4 != other.ASN4:
-			return -1
-		if self.as_seq != other.as_seq:
-			return -1
-		if self.as_set != other.as_set:
-			return -1
-		return 0
+	def __eq__ (self, other):
+		return \
+			self.ID == other.ID and \
+			self.FLAG == other.FLAG and \
+			self.ASN4 == other.ASN4 and \
+			self.as_seq == other.as_seq and \
+			self.as_set == other.as_set
 
-	def _segment (self,seg_type,values,negotiated):
-		l = len(values)
-		if l:
-			if l>255:
-				return self._segment(seg_type,values[:255],negotiated) + self._segment(seg_type,values[255:],negotiated)
-			return "%s%s%s" % (chr(seg_type),chr(len(values)),''.join([v.pack(negotiated) for v in values]))
+	def __ne__ (self, other):
+		return not self.__eq__(other)
+
+	def _segment (self, seg_type, values, asn4):
+		length = len(values)
+		if length:
+			if length > 255:
+				return self._segment(seg_type,values[:255],asn4) + self._segment(seg_type,values[255:],asn4)
+			return "%s%s%s" % (chr(seg_type),chr(len(values)),''.join([v.pack(asn4) for v in values]))
 		return ""
 
-	def _segments (self,negotiated):
+	def _segments (self, asn4):
 		segments = ''
 		if self.as_cseq:
-			segments += self._segment(self.AS_CONFED_SEQUENCE,self.as_cseq,negotiated)
+			segments += self._segment(self.AS_CONFED_SEQUENCE,self.as_cseq,asn4)
 		if self.as_cset:
-			segments += self._segment(self.AS_CONFED_SET,self.as_cset,negotiated)
+			segments += self._segment(self.AS_CONFED_SET,self.as_cset,asn4)
 		if self.as_seq:
-			segments += self._segment(self.AS_SEQUENCE,self.as_seq,negotiated)
+			segments += self._segment(self.AS_SEQUENCE,self.as_seq,asn4)
 		if self.as_set:
-			segments += self._segment(self.AS_SET,self.as_set,negotiated)
+			segments += self._segment(self.AS_SET,self.as_set,asn4)
 		return segments
 
-	def _pack (self,negotiated,force_asn4=False):
+	def asn_pack (self, negotiated, force_asn4=False):
 		asn4 = True if force_asn4 else negotiated.asn4
-		if not self.packed[asn4]:
-			self.packed[asn4] = self._attribute(self._segments(negotiated))
-		return self.packed[asn4]
+		if not self._packed[asn4]:
+			self._packed[asn4] = self._attribute(self._segments(asn4))
+		return self._packed[asn4]
 
-	def pack (self,negotiated):
+	def pack (self, negotiated):
 		# if the peer does not understand ASN4, we need to build a transitive AS4_PATH
 		if negotiated.asn4:
-			return self._pack(negotiated)
+			return self.asn_pack(negotiated)
 
 		as2_seq = [_ if not _.asn4() else AS_TRANS for _ in self.as_seq]
 		as2_set = [_ if not _.asn4() else AS_TRANS for _ in self.as_set]
 
-		message = ASPath(as2_seq,as2_set,self.as_conf_sequence,self.as_conf_set)._pack(negotiated)
+		message = ASPath(as2_seq,as2_set,self.as_cseq,self.as_cset).asn_pack(negotiated,False)
 		if AS_TRANS in as2_seq or AS_TRANS in as2_set:
-			message += AS4Path(self.as_seq,self.as_set,self.as_conf_sequence,self.as_conf_set)._pack(negotiated,True)
+			message += AS4Path(self.as_seq,self.as_set,self.as_cseq,self.as_cset).asn_pack(negotiated,True)
 		return message
 
 	def __len__ (self):
 		raise RuntimeError('it makes no sense to ask for the size of this object')
 
-	def __str__ (self,confed=False):
+	def __repr__ (self, confed=False):
 		if self._str:
 			return self._str
 
@@ -106,7 +107,7 @@ class ASPath (Attribute):
 		self._str = string
 		return string
 
-	def string (self,aseq,aset):
+	def string (self, aseq, aset):
 		lseq = len(aseq)
 		lset = len(aset)
 		if lseq == 1:
@@ -114,22 +115,25 @@ class ASPath (Attribute):
 				string = '[ %d ]' % aseq[0]
 			else:
 				string = '[ %s %s]' % (aseq[0],'( %s ) ' % (' '.join([str(_) for _ in aset])))
-		elif lseq > 1 :
+		elif lseq > 1:
 			if lset:
 				string = '[ %s %s]' % ((' '.join([str(_) for _ in aseq])),'( %s ) ' % (' '.join([str(_) for _ in aset])))
 			else:
 				string = '[ %s ]' % ' '.join([str(_) for _ in aseq])
 		else:  # lseq == 0
-			string = '[ ]'
+			if lset:
+				string = '[ ( %s )]' % (' '.join([str(_) for _ in aset]))
+			else:
+				string = '[ ]'
 		return string
 
-	def json (self,name):
+	def json (self, name):
 		match = {
-			#                               data , default representation
-			'as-path'            : (self.as_seq  , '[]'),
-			'as-set'             : (self.as_set  , ''),
-			'confederation-path' : (self.as_cseq , '[]'),
-			'confederation-set'  : (self.as_cset , ''),
+			# data , default representation
+			'as-path':            (self.as_seq,  '[]'),
+			'as-set':             (self.as_set,  ''),
+			'confederation-path': (self.as_cseq, '[]'),
+			'confederation-set':  (self.as_cset, ''),
 		}
 
 		data,default = match[name]
@@ -137,7 +141,7 @@ class ASPath (Attribute):
 		return self._json[name]
 
 	@classmethod
-	def __new_aspaths (cls,data,asn4,klass=None):
+	def _new_aspaths (cls, data, asn4, klass=None):
 		as_set = []
 		as_seq = []
 		as_cset = []
@@ -146,18 +150,18 @@ class ASPath (Attribute):
 		backup = data
 
 		unpacker = {
-			False : '!H',
-			True  : '!L',
+			False: '!H',
+			True:  '!L',
 		}
 		size = {
 			False: 2,
-			True : 4,
+			True:  4,
 		}
 		as_choice = {
-			ASPath.AS_SEQUENCE : as_seq,
-			ASPath.AS_SET      : as_set,
-			ASPath.AS_CONFED_SEQUENCE : as_cseq,
-			ASPath.AS_CONFED_SET      : as_cset,
+			ASPath.AS_SEQUENCE: as_seq,
+			ASPath.AS_SET:      as_set,
+			ASPath.AS_CONFED_SEQUENCE: as_cseq,
+			ASPath.AS_CONFED_SET:      as_cset,
 		}
 
 		upr = unpacker[asn4]
@@ -178,7 +182,7 @@ class ASPath (Attribute):
 				# Eat the data and ignore it if the ASPath attribute is know known
 				asns = as_choice.get(stype,[])
 
-				for i in range(slen):
+				for _ in range(slen):
 					asn = unpack(upr,sdata[:length])[0]
 					asns.append(ASN(asn))
 					sdata = sdata[length:]
@@ -193,32 +197,31 @@ class ASPath (Attribute):
 		return cls(as_seq,as_set,as_cseq,as_cset,backup)
 
 	@classmethod
-	def unpack (cls,data,negotiated):
+	def unpack (cls, data, negotiated):
 		if not data:
 			return None  # ASPath.Empty
-		return cls.__new_aspaths(data,negotiated.asn4,ASPath)
+		return cls._new_aspaths(data,negotiated.asn4,ASPath)
 
 
 ASPath.Empty = ASPath([],[])
-ASPath.register_attribute()
 
 
 # ================================================================= AS4Path (17)
 #
 
+@Attribute.register()
 class AS4Path (ASPath):
-	ID = Attribute.ID.AS4_PATH
-	FLAG = Attribute.Flag.TRANSITIVE|Attribute.Flag.OPTIONAL
+	ID = Attribute.CODE.AS4_PATH
+	FLAG = Attribute.Flag.TRANSITIVE | Attribute.Flag.OPTIONAL
 	ASN4 = True
 
-	def pack (self,negotiated=None):
+	def pack (self, negotiated=None):
 		ASPath.pack(self,True)
 
 	@classmethod
-	def unpack (cls,data,negotiated):
+	def unpack (cls, data, negotiated):
 		if not data:
 			return None  # AS4Path.Empty
-		return cls.__new_aspaths(data,True,AS4Path)
+		return cls._new_aspaths(data,True,AS4Path)
 
 AS4Path.Empty = AS4Path([],[])
-AS4Path.register_attribute()

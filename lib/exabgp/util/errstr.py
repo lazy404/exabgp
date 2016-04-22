@@ -3,16 +3,17 @@
 errstr.py
 
 Created by Thomas Mangin on 2011-03-29.
-Copyright (c) 2009-2012 Exa Networks. All rights reserved.
+Copyright (c) 2009-2015 Exa Networks. All rights reserved.
 """
 
 import errno
 
-def errstr (e):
+
+def errstr (exc):
 	try:
-		code = e.args[0] if e.args else e.errno
-		return '[Errno %s] %s' % (errno.errorcode.get(code,str(code)),str(e))
+		code = exc.args[0] if exc.args else exc.errno
+		return '[Errno %s] %s' % (errno.errorcode.get(code,str(code)),str(exc))
 	except KeyError:
-		return '[Errno unknown (key)] %s' % str(e)
+		return '[Errno unknown (key)] %s' % str(exc)
 	except AttributeError:
-		return '[Errno unknown (attr)] %s' % str(e)
+		return '[Errno unknown (attr)] %s' % str(exc)

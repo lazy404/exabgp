@@ -3,7 +3,7 @@
 environment.py
 
 Created by Thomas Mangin on 2011-11-29.
-Copyright (c) 2011 Exa Networks. All rights reserved.
+Copyright (c) 2011-2015 Exa Networks. All rights reserved.
 """
 
 # XXX: raised exception not caught
@@ -18,11 +18,12 @@ import syslog
 
 from exabgp.util.ip import isip
 
+
 # ===================================================================== NoneDict
 #
 
 class NoneDict (dict):
-	def __getitem__ (self,name):
+	def __getitem__ (self, name):
 		return None
 nonedict = NoneDict()
 
@@ -49,7 +50,9 @@ class environment (object):
 	@staticmethod
 	def setup (conf):
 		if environment._settings:
-			raise RuntimeError('You already initialised the environment')
+			# nosetest is performing the setup multiple times, so we can not raise anymore
+			# raise RuntimeError('You already initialised the environment')
+			return environment._settings
 		environment._settings = _env(conf)
 		return environment._settings
 
@@ -125,12 +128,14 @@ class environment (object):
 
 	@staticmethod
 	def ip (_):
-		if isip(_): return _
+		if isip(_):
+			return _
 		raise TypeError('ip %s is invalid' % _)
 
 	@staticmethod
 	def optional_ip (_):
-		if not _ or isip(_): return _
+		if not _ or isip(_):
+			return _
 		raise TypeError('ip %s is invalid' % _)
 
 	@staticmethod
@@ -144,12 +149,14 @@ class environment (object):
 		return _
 
 	@staticmethod
-	def folder(path):
+	def folder (path):
 		paths = environment.root(path)
-		options = [path for path in paths if os.path.exists(path)]
-		if not options: raise TypeError('%s does not exists' % path)
+		options = [p for p in paths if os.path.exists(path)]
+		if not options:
+			raise TypeError('%s does not exists' % path)
 		first = options[0]
-		if not first: raise TypeError('%s does not exists' % first)
+		if not first:
+			raise TypeError('%s does not exists' % first)
 		return first
 
 	@staticmethod
@@ -165,15 +172,17 @@ class environment (object):
 		return "'%s'" % path
 
 	@staticmethod
-	def conf(path):
+	def conf (path):
 		first = environment.folder(path)
-		if not os.path.isfile(first): raise TypeError('%s is not a file' % path)
+		if not os.path.isfile(first):
+			raise TypeError('%s is not a file' % path)
 		return first
 
 	@staticmethod
 	def exe (path):
 		first = environment.conf(path)
-		if not os.access(first, os.X_OK): raise TypeError('%s is not an executable' % first)
+		if not os.access(first, os.X_OK):
+			raise TypeError('%s is not an executable' % first)
 		return first
 
 	@staticmethod
@@ -194,19 +203,31 @@ class environment (object):
 	@staticmethod
 	def syslog_value (log):
 		if log not in environment.log_levels:
-			if log == 'CRITICAL': log = 'CRIT'
-			if log == 'ERROR': log = 'ERR'
+			if log == 'CRITICAL':
+				log = 'CRIT'
+			if log == 'ERROR':
+				log = 'ERR'
 			raise TypeError('invalid log level %s' % log)
-		return getattr(syslog,'LOG_%s'%log)
+		return getattr(syslog,'LOG_%s' % log)
 
 	@staticmethod
 	def syslog_name (log):
 		for name in environment.log_levels:
-			if name == 'CRITICAL': name = 'CRIT'
-			if name == 'ERROR': name = 'ERR'
-			if getattr(syslog,'LOG_%s'%name) == log:
+			if name == 'CRITICAL':
+				name = 'CRIT'
+			if name == 'ERROR':
+				name = 'ERR'
+			if getattr(syslog,'LOG_%s' % name) == log:
 				return name
 		raise TypeError('invalid log level %s' % log)
+
+	@staticmethod
+	def umask_read (_):
+		return int(_, 8)
+
+	@staticmethod
+	def umask_write (_):
+		return "'%s'" % (oct(_))
 
 	@staticmethod
 	def default ():
@@ -215,8 +236,8 @@ class environment (object):
 				continue
 			for option in sorted(environment.configuration[section]):
 				values = environment.configuration[section][option]
-				default = "'%s'" % values[2] if values[1] in (environment.list,environment.path,environment.quote,environment.syslog) else values[2]
-				yield '%s.%s.%s %s: %s. default (%s)' % (environment.application,section,option,' '*(20-len(section)-len(option)),values[3],default)
+				default = "'%s'" % values['value'] if values['write'] in (environment.list,environment.path,environment.quote,environment.syslog) else values['value']
+				yield '%s.%s.%s %s: %s. default (%s)' % (environment.application,section,option,' '*(20-len(section)-len(option)),values['help'],default)
 
 	@staticmethod
 	def iter_ini (diff=False):
@@ -226,12 +247,12 @@ class environment (object):
 			header = '\n[%s.%s]' % (environment.application,section)
 			for k in sorted(environment._settings[section]):
 				v = environment._settings[section][k]
-				if diff and environment.configuration[section][k][0](environment.configuration[section][k][2]) == v:
+				if diff and environment.configuration[section][k]['read'](environment.configuration[section][k]['value']) == v:
 					continue
 				if header:
 					yield header
 					header = ''
-				yield '%s = %s' % (k,environment.configuration[section][k][1](v))
+				yield '%s = %s' % (k,environment.configuration[section][k]['write'](v))
 
 	@staticmethod
 	def iter_env (diff=False):
@@ -239,106 +260,20 @@ class environment (object):
 			if section in ('internal','debug'):
 				continue
 			for k,v in values.items():
-				if diff and environment.configuration[section][k][0](environment.configuration[section][k][2]) == v:
+				if diff and environment.configuration[section][k]['read'](environment.configuration[section][k]['value']) == v:
 					continue
-				if environment.configuration[section][k][1] == environment.quote:
+				if environment.configuration[section][k]['write'] == environment.quote:
 					yield "%s.%s.%s='%s'" % (environment.application,section,k,v)
 					continue
-				yield "%s.%s.%s=%s" % (environment.application,section,k,environment.configuration[section][k][1](v))
-
-
-	# Compatibility with 2.0.x
-	@staticmethod
-	def _compatibility (env):
-		profile = os.environ.get('PROFILE','')
-		if profile:
-			env.profile.enable=True
-		if profile and profile.lower() not in ['1','true','yes','on','enable']:
-			env.profile.file=profile
-
-		# PDB : still compatible as a side effect of the code structure
-
-		syslog = os.environ.get('SYSLOG','')
-		if syslog != '':
-			env.log.destination=syslog
-
-		if os.environ.get('DEBUG_SUPERVISOR','').lower() in ['1','yes']:
-			env.log.reactor = True
-		if os.environ.get('DEBUG_DAEMON','').lower() in ['1','yes']:
-			env.log.daemon = True
-		if os.environ.get('DEBUG_PROCESSES','').lower() in ['1','yes']:
-			env.log.processes = True
-		if os.environ.get('DEBUG_CONFIGURATION','').lower() in ['1','yes']:
-			env.log.configuration = True
-		if os.environ.get('DEBUG_WIRE','').lower() in ['1','yes']:
-			env.log.network = True
-			env.log.packets = True
-		if os.environ.get('DEBUG_MESSAGE','').lower() in ['1','yes']:
-			env.log.message = True
-		if os.environ.get('DEBUG_RIB','').lower() in ['1','yes']:
-			env.log.rib = True
-		if os.environ.get('DEBUG_TIMER','').lower() in ['1','yes']:
-			env.log.timers = True
-		if os.environ.get('DEBUG_PARSER','').lower() in ['1','yes']:
-			env.log.parser = True
-		if os.environ.get('DEBUG_ROUTE','').lower() in ['1','yes']:
-			env.log.routes = True
-		if os.environ.get('DEBUG_ROUTES','').lower() in ['1','yes']:  # DEPRECATED even in 2.0.x
-			env.log.routes = True
-		if os.environ.get('DEBUG_ALL','').lower() in ['1','yes']:
-			env.log.all = True
-		if os.environ.get('DEBUG_CORE','').lower() in ['1','yes']:
-			env.log.reactor = True
-			env.log.daemon = True
-			env.log.processes = True
-			env.log.message = True
-			env.log.timer = True
-			env.log.routes = True
-			env.log.parser = False
-
-		pid = os.environ.get('PID','')
-		if pid:
-			env.daemon.pid = pid
-
-		import pwd
-
-		try:
-			me = pwd.getpwuid(os.getuid()).pw_name
-			user = os.environ.get('USER','')
-			if user and user != 'root' and user != me and env.daemon.user == 'nobody':
-				env.daemon.user = user
-		except KeyError:
-			pass
-
-		daemon = os.environ.get('DAEMONIZE','').lower() in ['1','yes']
-		if daemon:
-			env.daemon.daemonize = True
-			env.log.enable = False
-
-		return env
-
-
-# ================================================================= ConfigParser
-#
-
-import ConfigParser
-
-class Store (dict):
-	def __getitem__ (self,key):
-		return dict.__getitem__(self,key.replace('_','-'))
-
-	def __setitem__ (self,key,value):
-		return dict.__setitem__(self,key.replace('_','-'),value)
-
-	def __getattr__ (self,key):
-		return dict.__getitem__(self,key.replace('_','-'))
-
-	def __setattr__ (self,key,value):
-		return dict.__setitem__(self,key.replace('_','-'),value)
+				yield "%s.%s.%s=%s" % (environment.application,section,k,environment.configuration[section][k]['write'](v))
 
 
 # ========================================================================= _env
 #
+
+import ConfigParser
+from exabgp.util.hashtable import HashTable
+
 
 def _env (conf):
 	here = os.path.join(os.sep,*os.path.join(environment.location.split(os.sep)))
@@ -369,7 +304,7 @@ def _env (conf):
 		_conf_paths.append(os.path.normpath(os.path.join(location,'etc',environment.application,'%s.env' % environment.application)))
 	_conf_paths.append(os.path.normpath(os.path.join('/','etc',environment.application,'%s.env' % environment.application)))
 
-	env = Store()
+	env = HashTable()
 	ini = ConfigParser.ConfigParser()
 
 	ini_files = [path for path in _conf_paths if os.path.exists(path)]
@@ -380,7 +315,7 @@ def _env (conf):
 		default = environment.configuration[section]
 
 		for option in default:
-			convert = default[option][0]
+			convert = default[option]['read']
 			try:
 				proxy_section = '%s.%s' % (environment.application,section)
 				env_name = '%s.%s' % (proxy_section,option)
@@ -394,12 +329,12 @@ def _env (conf):
 					conf = environment.unquote(ini.get(proxy_section,option,nonedict))
 					# name without an = or : in the configuration and no value
 					if conf is None:
-						conf = default[option][2]
+						conf = default[option]['value']
 			except (ConfigParser.NoSectionError,ConfigParser.NoOptionError):
-				conf = default[option][2]
+				conf = default[option]['value']
 			try:
-				env.setdefault(section,Store())[option] = convert(conf)
+				env.setdefault(section,HashTable())[option] = convert(conf)
 			except TypeError:
 				raise environment.Error('invalid value for %s.%s : %s' % (section,option,conf))
 
-	return environment._compatibility(env)
+	return env

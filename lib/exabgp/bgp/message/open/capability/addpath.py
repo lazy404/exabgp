@@ -3,32 +3,34 @@
 addpath.py
 
 Created by Thomas Mangin on 2012-07-17.
-Copyright (c) 2009-2013 Exa Networks. All rights reserved.
+Copyright (c) 2009-2015 Exa Networks. All rights reserved.
 """
 
 from struct import pack
 from exabgp.protocol.family import AFI
 from exabgp.protocol.family import SAFI
-from exabgp.bgp.message.open.capability import Capability
+from exabgp.bgp.message.open.capability.capability import Capability
 
 # ====================================================================== AddPath
 #
 
+
+@Capability.register()
 class AddPath (Capability,dict):
-	ID = Capability.ID.ADD_PATH
+	ID = Capability.CODE.ADD_PATH
 
 	string = {
-		0 : 'disabled',
-		1 : 'receive',
-		2 : 'send',
-		3 : 'send/receive',
+		0: 'disabled',
+		1: 'receive',
+		2: 'send',
+		3: 'send/receive',
 	}
 
-	def __init__ (self,families=(),send_receive=0):
+	def __init__ (self, families=(),send_receive=0):
 		for afi,safi in families:
 			self.add_path(afi,safi,send_receive)
 
-	def add_path (self,afi,safi,send_receive):
+	def add_path (self, afi, safi, send_receive):
 		self[(afi,safi)] = send_receive
 
 	def __str__ (self):
@@ -39,14 +41,14 @@ class AddPath (Capability,dict):
 		return '{ "name": "addpath"%s%s }' % (', ' if families else '', families)
 
 	def extract (self):
-		rs = []
+		rs = ''
 		for v in self:
 			if self[v]:
-				rs.append(v[0].pack() +v[1].pack() + pack('!B',self[v]))
-		return rs
+				rs += v[0].pack() + v[1].pack() + pack('!B',self[v])
+		return [rs,]
 
 	@staticmethod
-	def unpack (capability,instance,data):
+	def unpack_capability (instance, data, capability=None):  # pylint: disable=W0613
 		# XXX: FIXME: should check that we have not yet seen the capability
 		while data:
 			afi = AFI.unpack(data[:2])
@@ -55,5 +57,3 @@ class AddPath (Capability,dict):
 			instance.add_path(afi,safi,sr)
 			data = data[4:]
 		return instance
-
-AddPath.register_capability()

@@ -1,14 +1,15 @@
 # encoding: utf-8
 """
-labels.py
+esi.py
 
 Created by Thomas Mangin on 2012-07-08.
-Copyright (c) 2014-2014 Orange. All rights reserved.
-Copyright (c) 2014-2014 Exa Networks. All rights reserved.
+Copyright (c) 2014-2015 Orange. All rights reserved.
+Copyright (c) 2014-2015 Exa Networks. All rights reserved.
 """
 
 # TODO: take into account E-VPN specs that specify the role of the first bit of ESI
 # (since draft-ietf-l2vpn-evpn-05)
+
 
 # Ethernet Segment Identifier
 class ESI (object):
@@ -17,8 +18,28 @@ class ESI (object):
 
 	__slots__ = ['esi']
 
-	def __init__ (self,bytes=None):
-		self.esi = self.DEFAULT if bytes is None else bytes
+	def __init__ (self, esi=None):
+		self.esi = self.DEFAULT if esi is None else esi
+		if len(self.esi)!=10:
+			raise Exception("incorrect ESI, len %d instead of 10" % len(esi))
+
+	def __eq__ (self, other):
+		return self.esi == other.esi
+
+	def __neq__ (self, other):
+		return self.esi != other.esi
+
+	def __lt__ (self, other):
+		raise RuntimeError('comparing ESI for ordering does not make sense')
+
+	def __le__ (self, other):
+		raise RuntimeError('comparing ESI for ordering does not make sense')
+
+	def __gt__ (self, other):
+		raise RuntimeError('comparing ESI for ordering does not make sense')
+
+	def __ge__ (self, other):
+		raise RuntimeError('comparing ESI for ordering does not make sense')
 
 	def __str__ (self):
 		if self.esi == self.DEFAULT:
@@ -34,16 +55,9 @@ class ESI (object):
 	def __len__ (self):
 		return 10
 
-	def __cmp__ (self,other):
-		if not isinstance(other,self.__class__):
-			return -1
-		if self.esi != other.esi:
-			return -1
-		return 0
-
 	def __hash__ (self):
 		return hash(self.esi)
 
 	@classmethod
-	def unpack (cls,data):
+	def unpack (cls, data):
 		return cls(data[:10])

@@ -3,10 +3,11 @@
 error.py
 
 Created by Thomas Mangin on 2013-07-11.
-Copyright (c) 2013-2013 Exa Networks. All rights reserved.
+Copyright (c) 2013-2015 Exa Networks. All rights reserved.
 """
 
 import errno
+
 
 class error:
 	block = set((
@@ -29,20 +30,55 @@ class error:
 		errno.ECONNREFUSED, errno.EHOSTUNREACH,
 	))
 
-class NetworkError   (Exception): pass
-class BindingError   (NetworkError): pass
-class AcceptError    (NetworkError): pass
-class NotConnected   (NetworkError): pass
-class LostConnection (NetworkError): pass
-class MD5Error       (NetworkError): pass
-class NagleError     (NetworkError): pass
-class TTLError       (NetworkError): pass
-class AsyncError     (NetworkError): pass
-class TooSlowError   (NetworkError): pass
-class SizeError      (NetworkError): pass  # not used atm - can not generate message due to size
+
+class NetworkError   (Exception):
+	pass
+
+
+class BindingError   (NetworkError):
+	pass
+
+
+class AcceptError    (NetworkError):
+	pass
+
+
+class NotConnected   (NetworkError):
+	pass
+
+
+class LostConnection (NetworkError):
+	pass
+
+
+class MD5Error       (NetworkError):
+	pass
+
+
+class NagleError     (NetworkError):
+	pass
+
+
+class TTLError       (NetworkError):
+	pass
+
+
+class AsyncError     (NetworkError):
+	pass
+
+
+class TooSlowError   (NetworkError):
+	pass
+
+
+class SizeError      (NetworkError):
+	pass
+
+
+# not used atm - can not generate message due to size
 
 class NotifyError    (Exception):
-	def __init__ (self,code,subcode,msg):
+	def __init__ (self, code, subcode, msg):
 		self.code = code
 		self.subcode = subcode
 		Exception.__init__(self,msg)

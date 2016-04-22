@@ -3,7 +3,7 @@
 daemon.py
 
 Created by Thomas Mangin on 2011-05-02.
-Copyright (c) 2009-2013 Exa Networks. All rights reserved.
+Copyright (c) 2009-2015 Exa Networks. All rights reserved.
 """
 
 import os
@@ -18,20 +18,21 @@ from exabgp.logger import Logger
 
 MAXFD = 2048
 
+
 class Daemon (object):
 
-	def __init__ (self,reactor):
+	def __init__ (self, reactor):
 		self.pid = environment.settings().daemon.pid
 		self.user = environment.settings().daemon.user
 		self.daemonize = environment.settings().daemon.daemonize
+		self.umask = environment.settings().daemon.umask
 
 		self.logger = Logger()
 
 		self.reactor = reactor
 
 		os.chdir('/')
-		#os.umask(0)
-		os.umask(0137)
+		os.umask(self.umask)
 
 	def savepid (self):
 		self._saved_pid = False
@@ -67,8 +68,8 @@ class Daemon (object):
 			return
 		try:
 			os.remove(self.pid)
-		except OSError, e:
-			if e.errno == errno.ENOENT:
+		except OSError,exc:
+			if exc.errno == errno.ENOENT:
 				pass
 			else:
 				self.logger.daemon("Can not remove PIDfile %s" % self.pid,'error')
@@ -76,7 +77,7 @@ class Daemon (object):
 		self.logger.daemon("Removed PIDfile %s" % self.pid)
 
 	def drop_privileges (self):
-		"""returns true if we are left with insecure privileges"""
+		"""return true if we are left with insecure privileges"""
 		# os.name can be ['posix', 'nt', 'os2', 'ce', 'java', 'riscos']
 		if os.name not in ['posix',]:
 			return True
@@ -123,7 +124,7 @@ class Daemon (object):
 
 		return True
 
-	def _is_socket (self,fd):
+	def _is_socket (self, fd):
 		try:
 			s = socket.fromfd(fd, socket.AF_INET, socket.SOCK_RAW)
 		except ValueError:
@@ -131,9 +132,9 @@ class Daemon (object):
 			return False
 		try:
 			s.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE)
-		except socket.error, e:
+		except socket.error,exc:
 			# It is look like one but it is not a socket ...
-			if e.args[0] == errno.ENOTSOCK:
+			if exc.args[0] == errno.ENOTSOCK:
 				return False
 		return True
 
@@ -151,8 +152,8 @@ class Daemon (object):
 				pid = os.fork()
 				if pid > 0:
 					os._exit(0)
-			except OSError, e:
-				self.logger.reactor('Can not fork, errno %d : %s' % (e.errno,e.strerror),'critical')
+			except OSError,exc:
+				self.logger.reactor('Can not fork, errno %d : %s' % (exc.errno,exc.strerror),'critical')
 
 		# do not detach if we are already supervised or run by init like process
 		if self._is_socket(sys.__stdin__.fileno()) or os.getppid() == 1:
@@ -176,17 +177,17 @@ class Daemon (object):
 		os.dup2(0, 1)
 		os.dup2(0, 2)
 
-#		import resource
-#		if 'linux' in sys.platform:
-#			nofile = resource.RLIMIT_NOFILE
-#		elif 'bsd' in sys.platform:
-#			nofile = resource.RLIMIT_OFILE
-#		else:
-#			self.logger.daemon("For platform %s, can not close FDS before forking" % sys.platform)
-#			nofile = None
-#		if nofile:
-#			maxfd = resource.getrlimit(nofile)[1]
-#			if (maxfd == resource.RLIM_INFINITY):
-#				maxfd = MAXFD
-#		else:
-#			maxfd = MAXFD
+		# import resource
+		# if 'linux' in sys.platform:
+		# 	nofile = resource.RLIMIT_NOFILE
+		# elif 'bsd' in sys.platform:
+		# 	nofile = resource.RLIMIT_OFILE
+		# else:
+		# 	self.logger.daemon("For platform %s, can not close FDS before forking" % sys.platform)
+		# 	nofile = None
+		# if nofile:
+		# 	maxfd = resource.getrlimit(nofile)[1]
+		# 	if (maxfd == resource.RLIM_INFINITY):
+		# 		maxfd = MAXFD
+		# else:
+		# 	maxfd = MAXFD

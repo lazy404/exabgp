@@ -3,22 +3,23 @@
 peer.py
 
 Created by Thomas Mangin on 2009-08-25.
-Copyright (c) 2009-2013 Exa Networks. All rights reserved.
+Copyright (c) 2009-2015 Exa Networks. All rights reserved.
 """
 
 import time
-#import traceback
+# import traceback
 
 from exabgp.bgp.timer import ReceiveTimer
 from exabgp.bgp.timer import SendTimer
 from exabgp.bgp.message import Message
+from exabgp.bgp.fsm import FSM
 from exabgp.bgp.message.open.capability import Capability
 from exabgp.bgp.message.open.capability import REFRESH
-from exabgp.bgp.message.nop import NOP
-from exabgp.bgp.message.update import Update
+from exabgp.bgp.message import NOP
+from exabgp.bgp.message import Update
 from exabgp.bgp.message.refresh import RouteRefresh
-from exabgp.bgp.message.notification import Notification
-from exabgp.bgp.message.notification import Notify
+from exabgp.bgp.message import Notification
+from exabgp.bgp.message import Notify
 from exabgp.reactor.protocol import Protocol
 from exabgp.reactor.network.error import NetworkError
 from exabgp.reactor.api.processes import ProcessError
@@ -30,31 +31,23 @@ from exabgp.logger import Logger
 from exabgp.logger import FakeLogger
 from exabgp.logger import LazyFormat
 
-from exabgp.util.counter import Counter
 from exabgp.util.trace import trace
 
-from exabgp.util.enumeration import Enumeration
+from exabgp.util.panic import no_panic
+from exabgp.util.panic import footer
 
-STATE = Enumeration (
-	'idle',
-	'active',
-	'connect',
-	'opensent',
-	'openconfirm',
-	'established',
-)
 
-ACTION = Enumeration (
-	'close',
-	'later',
-	'immediate',
-	)
+class ACTION (object):
+	CLOSE = 0x01
+	LATER = 0x02
+	NOW   = 0x03
 
-SEND = Enumeration (
-	'done',
-	'normal',
-	'refresh',
-)
+
+class SEND (object):
+	DONE    = 0x01
+	NORMAL  = 0x02
+	REFRESH = 0x04
+
 
 # As we can not know if this is our first start or not, this flag is used to
 # always make the program act like it was recovering from a failure
@@ -62,18 +55,42 @@ SEND = Enumeration (
 # OPEN Graceful Restart Capability
 FORCE_GRACEFUL = True
 
-class Interrupted (Exception): pass
+
+class Interrupted (Exception):
+	def __init__ (self,direction):
+		Exception.__init__(self)
+		self.direction = direction
+
+
+# ======================================================================== Delay
+# Exponential backup for outgoing connection
+
+class Delay (object):
+	def __init__ (self):
+		self._time = time.time()
+		self._next = 0
+
+	def reset (self):
+		self._time = time.time()
+		self._next = 0
+
+	def increase (self):
+		self._time = time.time() + self._next
+		self._next = min(int(1 + self._next * 1.2),60)
+
+	def backoff (self):
+		return self._time > time.time()
 
 
 # =========================================================================== KA
 #
 
 class KA (object):
-	def __init__ (self,log,proto):
+	def __init__ (self, log, proto):
 		self._generator = self._keepalive(proto)
 		self.send_timer = SendTimer(log,proto.negotiated.holdtime)
 
-	def _keepalive (self,proto):
+	def _keepalive (self, proto):
 		need_ka   = False
 		generator = None
 
@@ -111,10 +128,25 @@ class KA (object):
 			raise Notify(4,0,'could not send keepalive')
 
 
+# =================================================================== Direction
+# Incoming/Outgoing dependent data
+
+class Direction (object):
+	def __init__ (self,name,code,fsm,proto,enabled,generator):
+		self.name = name
+		self.code = code
+		self.fsm = fsm
+		self.proto = proto
+		self.enabled = enabled
+		self.generator = generator
+		self.opposite = None
+
+
+# ======================================================================== Peer
 # Present a File like interface to socket.socket
 
 class Peer (object):
-	def __init__ (self,neighbor,reactor):
+	def __init__ (self, neighbor, reactor):
 		try:
 			self.logger = Logger()
 			# We only to try to connect via TCP once
@@ -122,7 +154,8 @@ class Peer (object):
 			self.bind = True if environment.settings().tcp.bind else False
 		except RuntimeError:
 			self.logger = FakeLogger()
-			self.once = True
+			self.once = False
+			self.bind = True
 
 		self.reactor = reactor
 		self.neighbor = neighbor
@@ -133,84 +166,72 @@ class Peer (object):
 		self._restart = True
 		# The peer was restarted (to know what kind of open to send for graceful restart)
 		self._restarted = FORCE_GRACEFUL
-		self._reset_skip()
 
+		# We want to remove routes which are not in the configuration anymote afte a signal to reload
+		self._reconfigure = True
 		# We want to send all the known routes
-		self._resend_routes = SEND.done
+		self._resend_routes = SEND.DONE
 		# We have new routes for the peers
 		self._have_routes = True
 
 		# We have been asked to teardown the session with this code
 		self._teardown = None
 
-		self._ = {'in':{},'out':{}}
+		self._delay = Delay()
+		self.recv_timer = None
 
-		self._['in']['state'] = STATE.idle
-		self._['out']['state'] = STATE.idle
+		self._incoming = Direction (
+			'in',
+			self._accept,
+			FSM(FSM.IDLE),
+			None,
+			False,
+			False
+		)
 
-		# value to reset 'generator' to
-		self._['in']['enabled'] = False
-		self._['out']['enabled'] = None if not self.neighbor.passive else False
+		self._outgoing = Direction (
+			'out',
+			self._connect,
+			FSM(FSM.IDLE),
+			None,
+			None if not self.neighbor.passive else False,
+			None if not self.neighbor.passive else False
+		)
 
-		# the networking code
-		self._['out']['proto'] = None
-		self._['in']['proto'] = None
+		self._incoming.opposite = self._outgoing
+		self._outgoing.opposite = self._incoming
 
-		# the networking code
-		self._['out']['code'] = self._connect
-		self._['in']['code'] = self._accept
+	def _reset (self, direction, message='',error=''):
+		direction.fsm.change(FSM.IDLE)
 
-		# the generator used by the main code
-		# * False, the generator for this direction is down
-		# * Generator, the code to run to connect or accept the connection
-		# * None, the generator must be re-created
-		self._['in']['generator'] = self._['in']['enabled']
-		self._['out']['generator'] = self._['out']['enabled']
-
-	def _reset (self,direction,message='',error=''):
-		self._[direction]['state'] = STATE.idle
-
-		if self._restart:
-			if self._[direction]['proto']:
-				self._[direction]['proto'].close('%s loop, peer reset, message [%s] error[%s]' % (direction,message,str(error)))
-			self._[direction]['proto'] = None
-			self._[direction]['generator'] = self._[direction]['enabled']
-			self._teardown = None
-			self._more_skip(direction)
-			self.neighbor.rib.reset()
-
-			# If we are restarting, and the neighbor definition is different, update the neighbor
-			if self._neighbor:
-				self.neighbor = self._neighbor
-				self._neighbor = None
-		else:
-			self._[direction]['generator'] = False
-			self._[direction]['proto'] = None
-
-	def _stop (self,direction,message):
-		self._[direction]['generator'] = False
-		self._[direction]['proto'].close('%s loop, stop, message [%s]' % (direction,message))
-		self._[direction]['proto'] = None
-
-	# connection delay
-
-	def _reset_skip (self):
-		# We are currently not skipping connection attempts
-		self._skip_time = time.time()
-		# when we can not connect to a peer how many time (in loop) should we back-off
-		self._next_skip = 0
-
-	def _more_skip (self,direction):
-		if direction != 'out':
+		if not self._restart:
+			direction.generator = False
+			direction.proto = None
 			return
-		self._skip_time = time.time() + self._next_skip
-		self._next_skip = int(1+ self._next_skip*1.2)
-		if self._next_skip > 60:
-			self._next_skip = 60
+
+		if direction.proto:
+			direction.proto.close('%s loop, peer reset, message [%s] error[%s]' % (direction.name,message,str(error)))
+		direction.proto = None
+		direction.generator = direction.enabled
+
+		self._teardown = None
+		if direction.name == 'out':
+			self._delay.increase()
+		self.neighbor.rib.reset()
+
+		# If we are restarting, and the neighbor definition is different, update the neighbor
+		if self._neighbor:
+			self.neighbor = self._neighbor
+			self._neighbor = None
+
+	def _stop (self, direction, message):
+		direction.generator = False
+		direction.proto.close('%s loop, stop, message [%s]' % (direction.name,message))
+		direction.proto = None
 
 	# logging
 
-	def me (self,message):
+	def me (self, message):
 		return "peer %s ASN %-7s %s" % (self.neighbor.peer_address,self.neighbor.peer_as,message)
 
 	# control
@@ -219,115 +240,125 @@ class Peer (object):
 		self._teardown = 3
 		self._restart = False
 		self._restarted = False
-		self._reset_skip()
+		self._delay.reset()
 
 	def resend (self):
-		self._resend_routes = SEND.normal
-		self._reset_skip()
+		self._resend_routes = SEND.NORMAL
+		self._delay.reset()
 
-	def send_new (self,changes=None,update=None):
+	def send_new (self, changes=None,update=None):
 		if changes:
 			self.neighbor.rib.outgoing.replace(changes)
 		self._have_routes = self.neighbor.flush if update is None else update
 
-	def restart (self,restart_neighbor=None):
+	def reestablish (self, restart_neighbor=None):
 		# we want to tear down the session and re-establish it
 		self._teardown = 3
 		self._restart = True
 		self._restarted = True
-		self._resend_routes = SEND.normal
+		self._resend_routes = SEND.NORMAL
 		self._neighbor = restart_neighbor
-		self._reset_skip()
+		self._delay.reset()
 
-	def teardown (self,code,restart=True):
+	def reconfigure (self, restart_neighbor=None):
+		# we want to update the route which were in the configuration file
+		self._reconfigure = True
+		self._neighbor = restart_neighbor
+		self._resend_routes = SEND.NORMAL
+		self._neighbor = restart_neighbor
+
+	def teardown (self, code, restart=True):
 		self._restart = restart
 		self._teardown = code
-		self._reset_skip()
+		self._delay.reset()
 
 	# sockets we must monitor
 
 	def sockets (self):
 		ios = []
-		for direction in ['in','out']:
-			proto = self._[direction]['proto']
+		for proto in (self._incoming.proto,self._outgoing.proto):
 			if proto and proto.connection and proto.connection.io:
 				ios.append(proto.connection.io)
 		return ios
 
-	def incoming (self,connection):
+	def incoming (self, connection):
 		# if the other side fails, we go back to idle
-		if self._['in']['proto'] not in (True,False,None):
+		if self._incoming.proto not in (True,False,None):
 			self.logger.network('we already have a peer at this address')
 			return False
 
-		self._['in']['proto'] = Protocol(self).accept(connection)
+		# self._incoming.fsm.change(FSM.ACTIVE)
+		self._incoming.proto = Protocol(self).accept(connection)
 		# Let's make sure we do some work with this connection
-		self._['in']['generator'] = None
-		self._['in']['state'] = STATE.connect
+		self._incoming.generator = None
 		return True
 
 	def established (self):
-		return self._['in']['state'] == STATE.established or self._['out']['state'] == STATE.established
+		return self._incoming.fsm == FSM.ESTABLISHED or self._outgoing.fsm == FSM.ESTABLISHED
 
 	def _accept (self):
+		self._incoming.fsm.change(FSM.CONNECT)
+
 		# we can do this as Protocol is a mutable object
-		proto = self._['in']['proto']
+		proto = self._incoming.proto
 
 		# send OPEN
+		message = Message.CODE.NOP
+
 		for message in proto.new_open(self._restarted):
-			if ord(message.TYPE) == Message.ID.NOP:
-				yield ACTION.immediate
+			if ord(message.TYPE) == Message.CODE.NOP:
+				yield ACTION.NOW
 
 		proto.negotiated.sent(message)
 
-		self._['in']['state'] = STATE.opensent
+		self._incoming.fsm.change(FSM.OPENSENT)
 
 		# Read OPEN
 		wait = environment.settings().bgp.openwait
 		opentimer = ReceiveTimer(self.me,wait,1,1,'waited for open too long, we do not like stuck in active')
 		# Only yield if we have not the open, otherwise the reactor can run the other connection
 		# which would be bad as we need to do the collission check without going to the other peer
-		for message in proto.read_open(self.neighbor.peer_address.ip):
+		for message in proto.read_open(self.neighbor.peer_address.top()):
 			opentimer.check_ka(message)
-			if ord(message.TYPE) == Message.ID.NOP:
-				yield ACTION.later
+			if ord(message.TYPE) == Message.CODE.NOP:
+				yield ACTION.LATER
 
-		self._['in']['state'] = STATE.openconfirm
+		self._incoming.fsm.change(FSM.OPENCONFIRM)
 		proto.negotiated.received(message)
 		proto.validate_open()
 
-		if self._['out']['state'] == STATE.openconfirm:
+		if self._outgoing.fsm == FSM.OPENCONFIRM:
 			self.logger.network('incoming connection finds the outgoing connection is in openconfirm')
-			local_id = self.neighbor.router_id.packed
-			remote_id = proto.negotiated.received_open.router_id.packed
+			local_id = self.neighbor.router_id.pack()
+			remote_id = proto.negotiated.received_open.router_id.pack()
 
 			if local_id < remote_id:
 				self.logger.network('closing the outgoing connection')
-				self._stop('out','collision local id < remote id')
-				yield ACTION.later
+				self._stop(self._outgoing,'collision local id < remote id')
+				yield ACTION.LATER
 			else:
 				self.logger.network('aborting the incoming connection')
-				stop = Interrupted()
-				stop.direction = 'in'
-				raise stop
+				raise Interrupted(self._incoming)
 
 		# Send KEEPALIVE
-		for message in self._['in']['proto'].new_keepalive('OPENCONFIRM'):
-			yield ACTION.immediate
+		for message in self._incoming.proto.new_keepalive('OPENCONFIRM'):
+			yield ACTION.NOW
 
 		# Start keeping keepalive timer
 		self.recv_timer = ReceiveTimer(self.me,proto.negotiated.holdtime,4,0)
 		# Read KEEPALIVE
 		for message in proto.read_keepalive():
 			self.recv_timer.check_ka(message)
-			yield ACTION.immediate
+			yield ACTION.NOW
 
-		self._['in']['state'] = STATE.established
+		self._incoming.fsm.change(FSM.ESTABLISHED)
 		# let the caller know that we were sucesfull
-		yield ACTION.immediate
+		yield ACTION.NOW
 
 	def _connect (self):
 		# try to establish the outgoing connection
+
+		self._outgoing.fsm.change(FSM.ACTIVE)
 
 		proto = Protocol(self)
 		generator = proto.connect()
@@ -335,101 +366,99 @@ class Peer (object):
 		connected = False
 		try:
 			while not connected:
+				if self._teardown:
+					raise StopIteration()
 				connected = generator.next()
 				# we want to come back as soon as possible
-				yield ACTION.later
+				yield ACTION.LATER
 		except StopIteration:
 			# Connection failed
 			if not connected:
-				proto.close('connection to peer failed')
+				proto.close('connection to %s:%d failed' % (self.neighbor.peer_address,proto.port))
 			# A connection arrived before we could establish !
-			if not connected or self._['in']['proto']:
-				stop = Interrupted()
-				stop.direction = 'out'
-				raise stop
+			if not connected or self._incoming.proto:
+				yield ACTION.NOW
+				raise Interrupted(self._outgoing)
 
-		self._['out']['state'] = STATE.connect
-		self._['out']['proto'] = proto
+		self._outgoing.fsm.change(FSM.CONNECT)
+		self._outgoing.proto = proto
 
 		# send OPEN
 		# Only yield if we have not the open, otherwise the reactor can run the other connection
 		# which would be bad as we need to set the state without going to the other peer
+		message = Message.CODE.NOP
 		for message in proto.new_open(self._restarted):
-			if ord(message.TYPE) == Message.ID.NOP:
-				yield ACTION.immediate
+			if ord(message.TYPE) == Message.CODE.NOP:
+				yield ACTION.NOW
 
 		proto.negotiated.sent(message)
 
-		self._['out']['state'] = STATE.opensent
+		self._outgoing.fsm.change(FSM.OPENSENT)
 
 		# Read OPEN
 		wait = environment.settings().bgp.openwait
 		opentimer = ReceiveTimer(self.me,wait,1,1,'waited for open too long, we do not like stuck in active')
-		for message in self._['out']['proto'].read_open(self.neighbor.peer_address.ip):
+		for message in self._outgoing.proto.read_open(self.neighbor.peer_address.top()):
 			opentimer.check_ka(message)
 			# XXX: FIXME: change the whole code to use the ord and not the chr version
 			# Only yield if we have not the open, otherwise the reactor can run the other connection
 			# which would be bad as we need to do the collission check
-			if ord(message.TYPE) == Message.ID.NOP:
-				yield ACTION.later
+			if ord(message.TYPE) == Message.CODE.NOP:
+				yield ACTION.LATER
 
-		self._['out']['state'] = STATE.openconfirm
+		self._outgoing.fsm.change(FSM.OPENCONFIRM)
 		proto.negotiated.received(message)
 		proto.validate_open()
 
-		if self._['in']['state'] == STATE.openconfirm:
+		if self._incoming.fsm == FSM.OPENCONFIRM:
 			self.logger.network('outgoing connection finds the incoming connection is in openconfirm')
-			local_id = self.neighbor.router_id.packed
-			remote_id = proto.negotiated.received_open.router_id.packed
+			local_id = self.neighbor.router_id.pack()
+			remote_id = proto.negotiated.received_open.router_id.pack()
 
 			if local_id < remote_id:
 				self.logger.network('aborting the outgoing connection')
-				stop = Interrupted()
-				stop.direction = 'out'
-				raise stop
+				raise Interrupted(self._outgoing)
 			else:
 				self.logger.network('closing the incoming connection')
-				self._stop('in','collision local id < remote id')
-				yield ACTION.later
+				self._stop(self._incoming,'collision local id < remote id')
+				yield ACTION.LATER
 
 		# Send KEEPALIVE
 		for message in proto.new_keepalive('OPENCONFIRM'):
-			yield ACTION.immediate
+			yield ACTION.NOW
 
 		# Start keeping keepalive timer
 		self.recv_timer = ReceiveTimer(self.me,proto.negotiated.holdtime,4,0)
 		# Read KEEPALIVE
-		for message in self._['out']['proto'].read_keepalive():
+		for message in self._outgoing.proto.read_keepalive():
 			self.recv_timer.check_ka(message)
-			yield ACTION.immediate
+			yield ACTION.NOW
 
-		self._['out']['state'] = STATE.established
+		self._outgoing.fsm.change(FSM.ESTABLISHED)
 		# let the caller know that we were sucesfull
-		yield ACTION.immediate
+		yield ACTION.NOW
 
-
-	def _main (self,direction):
+	def _main (self, direction):
 		"""yield True if we want to come back to it asap, None if nothing urgent, and False if stopped"""
-
 		if self._teardown:
 			raise Notify(6,3)
 
-		proto = self._[direction]['proto']
+		proto = direction.proto
 
 		# Announce to the process BGP is up
-		self.logger.network('Connected to peer %s (%s)' % (self.neighbor.name(),direction))
+		self.logger.network('Connected to peer %s (%s)' % (self.neighbor.name(),direction.name))
 		if self.neighbor.api['neighbor-changes']:
 			try:
-				self.reactor.processes.up(self)
+				self.reactor.processes.up(self.neighbor)
 			except ProcessError:
 				# Can not find any better error code than 6,0 !
 				# XXX: We can not restart the program so this will come back again and again - FIX
 				# XXX: In the main loop we do exit on this kind of error
 				raise Notify(6,0,'ExaBGP Internal error, sorry.')
 
-		send_eor = True
+		send_eor = not self.neighbor.manual_eor
 		new_routes = None
-		self._resend_routes = SEND.normal
+		self._resend_routes = SEND.NORMAL
 		send_families = []
 
 		# Every last asm message should be re-announced on restart
@@ -437,40 +466,36 @@ class Peer (object):
 			if family in self.neighbor.families():
 				self.neighbor.messages.appendleft(self.neighbor.asm[family])
 
-		counter = Counter(self.logger,self.me)
 		operational = None
 		refresh = None
 		command_eor = None
 		number = 0
+		refresh_enhanced = True if proto.negotiated.refresh == REFRESH.ENHANCED else False
 
-		self.send_ka = KA(self.me,proto)
+		send_ka = KA(self.me,proto)
 
 		while not self._teardown:
 			for message in proto.read_message():
 				self.recv_timer.check_ka(message)
 
-				if self.send_ka() is not False:
+				if send_ka() is not False:
 					# we need and will send a keepalive
-					while self.send_ka() is None:
-						yield ACTION.immediate
-
-				# Give information on the number of routes seen
-				counter.display()
+					while send_ka() is None:
+						yield ACTION.NOW
 
 				# Received update
 				if message.TYPE == Update.TYPE:
-					counter.increment(len(message.nlris))
 					number += 1
 
-					self.logger.routes(LazyFormat(self.me('<< UPDATE (%d)' % number),lambda _: "%s%s" % (' attributes' if _ else '',_),message.attributes))
+					self.logger.routes(LazyFormat(self.me('<< UPDATE (%d)' % number),message.attributes,lambda _: "%s%s" % (' attributes' if _ else '',_)))
 
 					for nlri in message.nlris:
 						self.neighbor.rib.incoming.insert_received(Change(nlri,message.attributes))
-						self.logger.routes(LazyFormat(self.me('<< UPDATE (%d) nlri ' % number),str,nlri))
+						self.logger.routes(LazyFormat(self.me('<< UPDATE (%d) nlri ' % number),nlri,str))
 
 				elif message.TYPE == RouteRefresh.TYPE:
 					if message.reserved == RouteRefresh.request:
-						self._resend_routes = SEND.refresh
+						self._resend_routes = SEND.REFRESH
 						send_families.append((message.afi,message.safi))
 
 				# SEND OPERATIONAL
@@ -485,14 +510,17 @@ class Peer (object):
 							operational.next()
 						except StopIteration:
 							operational = None
+				# make sure that if some operational message are received via the API
+				# that we do not eat memory for nothing
+				elif self.neighbor.messages:
+					self.neighbor.messages.popleft()
 
 				# SEND REFRESH
 				if self.neighbor.route_refresh:
 					if not refresh:
 						new_refresh = self.neighbor.refresh.popleft() if self.neighbor.refresh else None
 						if new_refresh:
-							enhanced_negotiated = True if proto.negotiated.refresh == REFRESH.enhanced else False
-							refresh = proto.new_refresh(new_refresh,enhanced_negotiated)
+							refresh = proto.new_refresh(new_refresh)
 
 					if refresh:
 						try:
@@ -501,10 +529,23 @@ class Peer (object):
 							refresh = None
 
 				# Take the routes already sent to that peer and resend them
-				if self._resend_routes != SEND.done:
-					enhanced_refresh = True if self._resend_routes == SEND.refresh and proto.negotiated.refresh == REFRESH.enhanced else False
-					self._resend_routes = SEND.done
-					self.neighbor.rib.outgoing.resend(send_families,enhanced_refresh)
+				if self._reconfigure:
+					self._reconfigure = False
+
+					# we are here following a configuration change
+					if self._neighbor:
+						# see what changed in the configuration
+						self.neighbor.rib.outgoing.replace(self._neighbor.backup_changes,self._neighbor.changes)
+						# do not keep the previous routes in memory as they are not useful anymore
+						self._neighbor.backup_changes = []
+
+					self._have_routes = True
+
+				# Take the routes already sent to that peer and resend them
+				if self._resend_routes != SEND.DONE:
+					enhanced = True if refresh_enhanced and self._resend_routes == SEND.REFRESH else False
+					self._resend_routes = SEND.DONE
+					self.neighbor.rib.outgoing.resend(send_families,enhanced)
 					self._have_routes = True
 					send_families = []
 
@@ -526,14 +567,14 @@ class Peer (object):
 
 				elif send_eor:
 					send_eor = False
-					for eor in proto.new_eors():
-						yield ACTION.immediate
+					for _ in proto.new_eors():
+						yield ACTION.NOW
 					self.logger.message(self.me('>> EOR(s)'))
 
 				# SEND MANUAL KEEPALIVE (only if we have no more routes to send)
 				elif not command_eor and self.neighbor.eor:
-						new_eor = self.neighbor.eor.popleft()
-						command_eor = proto.new_eors(new_eor.afi,new_eor.safi)
+					new_eor = self.neighbor.eor.popleft()
+					command_eor = proto.new_eors(new_eor.afi,new_eor.safi)
 
 				if command_eor:
 					try:
@@ -542,20 +583,20 @@ class Peer (object):
 						command_eor = None
 
 				if new_routes or message.TYPE != NOP.TYPE:
-					yield ACTION.immediate
+					yield ACTION.NOW
 				elif self.neighbor.messages or operational:
-					yield ACTION.immediate
+					yield ACTION.NOW
 				elif self.neighbor.eor or command_eor:
-					yield ACTION.immediate
+					yield ACTION.NOW
 				else:
-					yield ACTION.later
+					yield ACTION.LATER
 
 				# read_message will loop until new message arrives with NOP
 				if self._teardown:
 					break
 
 		# If graceful restart, silent shutdown
-		if self.neighbor.graceful_restart and proto.negotiated.sent_open.capabilities.announced(Capability.ID.GRACEFUL_RESTART):
+		if self.neighbor.graceful_restart and proto.negotiated.sent_open.capabilities.announced(Capability.CODE.GRACEFUL_RESTART):
 			self.logger.network('Closing the session without notification','error')
 			proto.close('graceful restarted negotiated, closing without sending any notification')
 			raise NetworkError('closing')
@@ -563,129 +604,127 @@ class Peer (object):
 		# notify our peer of the shutdown
 		raise Notify(6,self._teardown)
 
-	def _run (self,direction):
+	def _run (self, direction):
 		"""yield True if we want the reactor to give us back the hand with the same peer loop, None if we do not have any more work to do"""
 		try:
-			for action in self._[direction]['code']():
+			for action in direction.code():
 				yield action
 
 			for action in self._main(direction):
 				yield action
 
 		# CONNECTION FAILURE
-		except NetworkError, e:
-			self._reset(direction,'closing connection',e)
-
-			# we tried to connect once, it failed, we stop
-			if self.once:
+		except NetworkError,network:
+			# we tried to connect once, it failed and it was not a manual request, we stop
+			if self.once and not self._teardown:
 				self.logger.network('only one attempt to connect is allowed, stopping the peer')
 				self.stop()
+
+			self._reset(direction,'closing connection',network)
 			return
 
 		# NOTIFY THE PEER OF AN ERROR
-		except Notify, n:
-			for direction in ['in','out']:
-				if self._[direction]['proto']:
+		except Notify,notify:
+			if direction.proto:
+				try:
+					generator = direction.proto.new_notification(notify)
 					try:
-						generator = self._[direction]['proto'].new_notification(n)
-						try:
-							maximum = 20
-							while maximum:
-								generator.next()
-								maximum -= 1
-								yield ACTION.immediate if maximum > 10 else ACTION.later
-						except StopIteration:
-							pass
-					except (NetworkError,ProcessError):
-						self.logger.network(self.me('NOTIFICATION NOT SENT'),'error')
+						maximum = 20
+						while maximum:
+							generator.next()
+							maximum -= 1
+							yield ACTION.NOW if maximum > 10 else ACTION.LATER
+					except StopIteration:
 						pass
-					self._reset(direction,'notification sent (%d,%d)' % (n.code,n.subcode),n)
-				else:
-					self._reset(direction)
+				except (NetworkError,ProcessError):
+					self.logger.network(self.me('NOTIFICATION NOT SENT'),'error')
+				self._reset(direction,'notification sent (%d,%d)' % (notify.code,notify.subcode),notify)
+			else:
+				self._reset(direction)
 			return
 
 		# THE PEER NOTIFIED US OF AN ERROR
-		except Notification, n:
-			self._reset(direction,'notification received (%d,%d)' % (n.code,n.subcode),n)
-
-			# we tried to connect once, it failed, we stop
-			if self.once:
+		except Notification,notification:
+			# we tried to connect once, it failed and it was not a manual request, we stop
+			if self.once and not self._teardown:
 				self.logger.network('only one attempt to connect is allowed, stopping the peer')
 				self.stop()
+
+			self._reset(direction,'notification received (%d,%d)' % (notification.code,notification.subcode),notification)
 			return
 
 		# RECEIVED a Message TYPE we did not expect
-		except Message, m:
-			self._reset(direction,'unexpected message received',m)
+		except Message,message:
+			self._reset(direction,'unexpected message received',message)
 			return
 
 		# PROBLEM WRITING TO OUR FORKED PROCESSES
-		except ProcessError, e:
-			self._reset(direction,'process problem',e)
+		except ProcessError, process:
+			self._reset(direction,'process problem',process)
 			return
 
 		# ....
-		except Interrupted, i:
-			self._reset(i.direction)
+		except Interrupted,interruption:
+			self._reset(interruption.direction)
 			return
 
 		# UNHANDLED PROBLEMS
-		except Exception, e:
+		except Exception,exc:
 			# Those messages can not be filtered in purpose
-			self.logger.error(self.me('UNHANDLED PROBLEM, please report'),'reactor')
-			self.logger.error(self.me(str(type(e))),'reactor')
-			self.logger.error(self.me(str(e)),'reactor')
-			self.logger.error(trace())
-
+			self.logger.raw('\n'.join([
+				no_panic,
+				self.me(''),
+				'',
+				str(type(exc)),
+				str(exc),
+				trace(),
+				footer
+			]))
 			self._reset(direction)
 			return
 	# loop
 
 	def run (self):
-		if self.reactor.processes.broken(self.neighbor.peer_address):
+		if self.reactor.processes.broken(self.neighbor):
 			# XXX: we should perhaps try to restart the process ??
 			self.logger.processes('ExaBGP lost the helper process for this peer - stopping','error')
 			self.stop()
 			return True
 
-		back = ACTION.later if self._restart else ACTION.close
+		back = ACTION.LATER if self._restart else ACTION.CLOSE
 
-		for direction in ['in','out']:
-			opposite = 'out' if direction == 'in' else 'in'
-
-			generator = self._[direction]['generator']
-			if generator:
+		for direction in (self._incoming, self._outgoing):
+			if direction.generator:
 				try:
 					# This generator only stops when it raises
-					r = generator.next()
+					r = direction.generator.next()
 
-					### if r is ACTION.immediate: status = 'immediately'
-					### elif r is ACTION.later:   status = 'next second'
-					### elif r is ACTION.close:   status = 'stop'
-					### else: status = 'buggy'
-					### self.logger.network('%s loop %11s, state is %s' % (direction,status,self._[direction]['state']),'debug')
+					# if r is ACTION.NOW: status = 'immediately'
+					# elif r is ACTION.LATER:   status = 'next second'
+					# elif r is ACTION.CLOSE:   status = 'stop'
+					# else: status = 'buggy'
+					# self.logger.network('%s loop %11s, state is %s' % (direction.name,status,direction.fsm),'debug')
 
-					if r == ACTION.immediate:
-						back = ACTION.immediate
-					elif r == ACTION.later:
-						back == ACTION.later if back != ACTION.immediate else ACTION.immediate
+					if r == ACTION.NOW:
+						back = ACTION.NOW
+					elif r == ACTION.LATER:
+						back = ACTION.LATER if back != ACTION.NOW else ACTION.NOW
 				except StopIteration:
 					# Trying to run a closed loop, no point continuing
-					self._[direction]['generator'] = self._[direction]['enabled']
+					direction.generator = direction.enabled
 
-			elif generator is None:
-				if self._[opposite]['state'] in [STATE.openconfirm,STATE.established]:
-					self.logger.network('%s loop, stopping, other one is established' % direction,'debug')
-					self._[direction]['generator'] = False
+			elif direction.generator is None:
+				if direction.opposite.fsm in [FSM.OPENCONFIRM,FSM.ESTABLISHED]:
+					self.logger.network('%s loop, stopping, other one is established' % direction.name,'debug')
+					direction.generator = False
 					continue
-				if direction == 'out' and self._skip_time > time.time():
-					self.logger.network('%s loop, skipping, not time yet' % direction,'debug')
-					back = ACTION.later
+				if direction.name == 'out' and self._delay.backoff():
+					self.logger.network('%s loop, skipping, not time yet' % direction.name,'debug')
+					back = ACTION.LATER
 					continue
 				if self._restart:
-					self.logger.network('%s loop, intialising' % direction,'debug')
-					self._[direction]['generator'] = self._run(direction)
-					back = ACTION.later  # make sure we go through a clean loop
-
+					self.logger.network('%s loop, intialising' % direction.name,'debug')
+					direction.generator = self._run(direction)
+					back = ACTION.LATER  # make sure we go through a clean loop
 
 		return back

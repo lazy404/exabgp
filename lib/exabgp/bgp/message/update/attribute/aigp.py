@@ -3,7 +3,7 @@
 aigp.py
 
 Created by Thomas Mangin on 2013-09-24.
-Copyright (c) 2009-2013 Exa Networks. All rights reserved.
+Copyright (c) 2009-2015 Exa Networks. All rights reserved.
 """
 
 from struct import pack
@@ -11,7 +11,9 @@ from struct import unpack
 
 from exabgp.bgp.message.update.attribute.attribute import Attribute
 
+
 # ========================================================================== TLV
+#
 
 # 0                   1                   2                   3
 # 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
@@ -28,9 +30,10 @@ from exabgp.bgp.message.update.attribute.attribute import Attribute
 class TLV (object):
 	__slots__ = ['type','value']
 
-	def __init__(self,type,value):
-		self.type = type
+	def __init__ (self, what, value):
+		self.type = what
 		self.value = value
+
 
 class TLVS (list):
 	__slots__ = []
@@ -52,37 +55,44 @@ class TLVS (list):
 # ==================================================================== AIGP (26)
 #
 
+@Attribute.register()
 class AIGP (Attribute):
-	ID = Attribute.ID.AIGP
+	ID = Attribute.CODE.AIGP
 	FLAG = Attribute.Flag.OPTIONAL
-	MULTIPLE = False
 	CACHING = True
 	TYPES = [1,]
 
-	__slots__ = ['aigp','packed']
+	__slots__ = ['aigp','_packed']
 
-	def __init__ (self,aigp,packed=None):
+	def __init__ (self, aigp, packed=None):
 		self.aigp = aigp
 		if packed:
-			self.packed = packed
+			self._packed = packed
 		else:
-			self.packed = self._attribute(aigp)
+			self._packed = self._attribute(aigp)
 
-	def pack (self,negotiated):
+	def __eq__ (self, other):
+		return \
+			self.ID == other.ID and \
+			self.FLAG == other.FLAG and \
+			self.aigp == other.aigp
+
+	def __ne__ (self, other):
+		return not self.__eq__(other)
+
+	def pack (self, negotiated):
 		if negotiated.neighbor.aigp:
-			return self.packed
+			return self._packed
 		if negotiated.local_as == negotiated.peer_as:
-			return self.packed
+			return self._packed
 		return ''
 
-	def __str__ (self):
+	def __repr__ (self):
 		return '0x' + ''.join('%02x' % ord(_) for _ in self.aigp[-8:])
 
 	@classmethod
-	def unpack (cls,data,negotiated):
+	def unpack (cls, data, negotiated):
 		if not negotiated.neighbor.aigp:
 			# AIGP must only be accepted on configured sessions
 			return None
 		return cls(unpack('!Q',data[:8] & 0x000000FFFFFFFFFF),data[:8])
-
-AIGP.register_attribute()

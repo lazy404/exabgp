@@ -3,14 +3,17 @@
 holdtime.py
 
 Created by Thomas Mangin on 2012-07-17.
-Copyright (c) 2009-2013 Exa Networks. All rights reserved.
+Copyright (c) 2009-2015 Exa Networks. All rights reserved.
 """
 
 from struct import pack
 
 # =================================================================== HoldTime
 
+
 class HoldTime (int):
+	MAX = 0xFFFF
+
 	def pack (self):
 		return pack('!H',self)
 

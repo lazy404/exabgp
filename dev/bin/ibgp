@@ -8,16 +8,7 @@ import socket
 import errno
 from struct import unpack
 import time
-
-def od (value):
-	def spaced (value):
-		even = None
-		for v in value:
-			if even is False:
-				yield ' '
-			yield '%02X' % ord(v)
-			even = not even
-	return ''.join(spaced(value))
+from exabgp.util.od import od
 
 class BGPHandler(asyncore.dispatcher_with_send):
 	wire = not not os.environ.get('wire','')
@@ -32,13 +23,13 @@ class BGPHandler(asyncore.dispatcher_with_send):
 		chr(4) : 'KEEPALIVE',
 	}
 
-	def isupdate (self,header):
+	def isupdate (self, header):
 		return header[18] == chr(2)
 
-	def name (self,header):
+	def name (self, header):
 		return self._name.get(header[18],'SOME WEIRD RFC PACKET')
 
-	def routes (self,body):
+	def routes (self, body):
 		len_w = unpack('!H',body[0:2])[0]
 		prefixes = [ord(_) for _ in body[2:2+len_w:]]
 
@@ -67,10 +58,10 @@ class BGPHandler(asyncore.dispatcher_with_send):
 				r[index] = prefixes.pop(0)
 			yield 'announce ' + '.'.join(str(_) for _ in r) + '/' + str(l)
 
-	def announce (self,*args):
+	def announce (self, *args):
 		print self.ip, self.port, ' '.join(str(_) for _ in args) if len(args) > 1 else args[0]
 
-	def setup (self,record,ip,port):
+	def setup (self, record, ip, port):
 		self.ip = ip
 		self.port = port
 		now = time.strftime("%a-%d-%b-%Y-%H:%M:%S", time.gmtime())
@@ -93,10 +84,10 @@ class BGPHandler(asyncore.dispatcher_with_send):
 					self.announce("TCP connection closed")
 					self.close()
 					return None,None
-			except socket.error, e:
-				if e.args[0] in (errno.EWOULDBLOCK,errno.EAGAIN):
+			except socket.error,exc:
+				if exc.args[0] in (errno.EWOULDBLOCK,errno.EAGAIN):
 					continue
-				raise e
+				raise exc
 
 		self.announce("read", self.name(header))
 
@@ -117,10 +108,10 @@ class BGPHandler(asyncore.dispatcher_with_send):
 				left = length-len(body)
 				if self.wire: self.announce("BODY   ", od(body))
 				if self.wire and left: self.announce("missing", left)
-			except socket.error, e:
-				if e.args[0] in (errno.EWOULDBLOCK,errno.EAGAIN):
+			except socket.error,exc:
+				if exc.args[0] in (errno.EWOULDBLOCK,errno.EAGAIN):
 					continue
-				raise e
+				raise exc
 
 		self.update_count += 1
 
@@ -150,7 +141,7 @@ class BGPHandler(asyncore.dispatcher_with_send):
 			self.send(self.keepalive)
 
 class BGPServer(asyncore.dispatcher):
-	def __init__(self, host, port, record):
+	def __init__ (self, host, port, record):
 		self.record = record
 		asyncore.dispatcher.__init__(self)
 		self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -158,10 +149,11 @@ class BGPServer(asyncore.dispatcher):
 		self.bind((host, port))
 		self.listen(5)
 
-	def handle_accept(self):
+	def handle_accept (self):
 		pair = self.accept()
 		if pair is not None:
-			sock, addr = pair
+			# The if prevent invalid unpacking
+			sock, addr = pair  # pylint: disable=W0633
 			print "new BGP connection from", addr
 			BGPHandler(sock).setup(self.record,*addr)
 
@@ -186,7 +178,13 @@ def drop ():
 		os.setuid(nuid)
 
 try:
-	port = int(os.environ.get('exabgp.tcp.port',int(os.environ.get('exabgp_tcp_port','179'))))
+	if os.environ.get('exabgp.tcp.port','').isdigit():
+		port = int(os.environ.get('exabgp.tcp.port'))
+	elif os.environ.get('exabgp_tcp_port','').isdigit():
+		port = int(os.environ.get('exabgp_tcp_port'))
+	else:
+		port = 179
+
 	bind = os.environ.get('exabgp.tcp.bind',os.environ.get('exabgp_tcp_bind','localhost'))
 	record = bool(os.environ.get('exabgp.wire.record',os.environ.get('exabgp.wire.record',False)))
 	server = BGPServer(bind,port,record)

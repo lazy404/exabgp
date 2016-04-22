@@ -2,7 +2,7 @@
 ethernetad.py
 
 Created by Thomas Mangin on 2014-06-27.
-Copyright (c) 2014-2014 Exa Networks. All rights reserved.
+Copyright (c) 2014-2015 Exa Networks. All rights reserved.
 """
 
 # from struct import pack
@@ -10,14 +10,12 @@ Copyright (c) 2014-2014 Exa Networks. All rights reserved.
 
 # from exabgp.protocol.family import AFI
 # from exabgp.protocol.family import SAFI
-# from exabgp.bgp.message.update.nlri.qualifier.esi import ESI
+# from exabgp.bgp.message.update.nlri.qualifier import ESI
 
-# from exabgp.bgp.message.update.nlri.qualifier.labels import Labels
-# from exabgp.bgp.message.update.nlri.qualifier.rd import RouteDistinguisher
+# from exabgp.bgp.message.update.nlri.qualifier import Labels
+# from exabgp.bgp.message.update.nlri.qualifier import RouteDistinguisher
 
 from exabgp.bgp.message.update.nlri.evpn.nlri import EVPN
-
-# ===================================================================== EVPNNLRI
 
 # +---------------------------------------+
 # |      RD   (8 octets)                  |
@@ -29,10 +27,13 @@ from exabgp.bgp.message.update.nlri.evpn.nlri import EVPN
 # |  MPLS Label (3 octets)                |
 # +---------------------------------------+
 
+# ===================================================================== EVPNNLRI
+
+
 class EthernetAD (EVPN):
 	CODE = 1
 	NAME = "Ethernet Auto-Discovery (A-D)"
 	SHORT_NAME = "EthernetAD"
 
-	def __init__ (**args):
+	def __init__ (self, **args):
 		raise Exception('unimplemented')

@@ -3,43 +3,58 @@
 neighbor.py
 
 Created by Thomas Mangin on 2009-11-05.
-Copyright (c) 2009-2013 Exa Networks. All rights reserved.
+Copyright (c) 2009-2015 Exa Networks. All rights reserved.
 """
 
+import os
+import uuid
+
 from collections import deque
+
+# collections.counter is python2.7 only ..
+from exabgp.dep.counter import Counter
 
 from exabgp.protocol.family import AFI
 
 from exabgp.bgp.message import Message
-from exabgp.bgp.message.open.holdtime import HoldTime
 from exabgp.bgp.message.open.capability import AddPath
 
-from exabgp.reactor.api.encoding import APIOptions
-
 from exabgp.rib import RIB
+
 
 # The definition of a neighbor (from reading the configuration)
 class Neighbor (object):
 	def __init__ (self):
 		# self.logger should not be used here as long as we do use deepcopy as it contains a Lock
-		self.description = ''
+		self.description = None
 		self.router_id = None
+		self.host_name = None
+		self.domain_name = None
 		self.local_address = None
 		self.peer_address = None
 		self.peer_as = None
 		self.local_as = None
-		self.hold_time = HoldTime(180)
+		self.hold_time = None
 		self.asn4 = None
-		self.add_path = 0
-		self.md5 = None
-		self.ttl = None
+		self.add_path = None
+		self.md5_password = None
+		self.md5_ip = None
+		self.ttl_in = None
+		self.ttl_out = None
 		self.group_updates = None
 		self.flush = None
 		self.adjribout = None
 
-		self.api = APIOptions()
+		self.manual_eor = False
 
+		self.api = None
+
+		# passive indicate that we do not establish outgoing connections
 		self.passive = False
+		# the port to listen on ( zero mean that we do not listen )
+		self.listen = 0
+		# the port to connect to
+		self.connect = 0
 
 		# capability
 		self.route_refresh = False
@@ -51,6 +66,11 @@ class Neighbor (object):
 		self._families = []
 		self.rib = None
 
+		# The routes we have parsed from the configuration
+		self.changes = []
+		# On signal update, the previous routes so we can compare what changed
+		self.backup_changes = []
+
 		self.operational = None
 		self.eor = deque()
 		self.asm = dict()
@@ -58,13 +78,12 @@ class Neighbor (object):
 		self.messages = deque()
 		self.refresh = deque()
 
-
-	def identificator (self):
+		self.counter = Counter()
 		# It is possible to :
 		# - have multiple exabgp toward one peer on the same host ( use of pid )
 		# - have more than once connection toward a peer
 		# - each connection has it own neihgbor (hence why identificator is not in Protocol)
-		return str(self.peer_address)
+		self.uid = '%d-%s' % (os.getpid(),uuid.uuid1())
 
 	def make_rib (self):
 		self.rib = RIB(self.name(),self.adjribout,self._families)
@@ -92,9 +111,9 @@ class Neighbor (object):
 		# this list() is important .. as we use the function to modify self._families
 		return list(self._families)
 
-	def add_family (self,family):
+	def add_family (self, family):
 		# the families MUST be sorted for neighbor indexing name to be predictable for API users
-		if not family in self.families():
+		if family not in self.families():
 			afi,safi = family
 			d = dict()
 			d[afi] = [safi,]
@@ -102,20 +121,25 @@ class Neighbor (object):
 				d.setdefault(afi,[]).append(safi)
 			self._families = [(afi,safi) for afi in sorted(d) for safi in sorted(d[afi])]
 
-	def remove_family (self,family):
+	def remove_family (self, family):
 		if family in self.families():
 			self._families.remove(family)
 
 	def missing (self):
-		if self.local_address is None: return 'local-address'
-		if self.peer_address is None: return 'peer-address'
-		if self.local_as is None: return 'local-as'
-		if self.peer_as is None: return 'peer-as'
-		if self.peer_address.afi == AFI.ipv6 and not self.router_id: return 'router-id'
+		if self.local_address is None:
+			return 'local-address'
+		if self.peer_address is None:
+			return 'peer-address'
+		if self.local_as is None:
+			return 'local-as'
+		if self.peer_as is None:
+			return 'peer-as'
+		if self.peer_address.afi == AFI.ipv6 and not self.router_id:
+			return 'router-id'
 		return ''
 
 	# This function only compares the neighbor BUT NOT ITS ROUTES
-	def __eq__ (self,other):
+	def __eq__ (self, other):
 		return \
 			self.router_id == other.router_id and \
 			self.local_address == other.local_address and \
@@ -123,9 +147,15 @@ class Neighbor (object):
 			self.peer_address == other.peer_address and \
 			self.peer_as == other.peer_as and \
 			self.passive == other.passive and \
+			self.listen == other.listen and \
+			self.connect == other.connect and \
 			self.hold_time == other.hold_time and \
-			self.md5 == other.md5 and \
-			self.ttl == other.ttl and \
+			self.host_name == other.host_name and \
+			self.domain_name == other.domain_name and \
+			self.md5_password == other.md5_password and \
+			self.md5_ip == other.md5_ip and \
+			self.ttl_in == other.ttl_in and \
+			self.ttl_out == other.ttl_out and \
 			self.route_refresh == other.route_refresh and \
 			self.graceful_restart == other.graceful_restart and \
 			self.multisession == other.multisession and \
@@ -136,85 +166,109 @@ class Neighbor (object):
 			self.adjribout == other.adjribout and \
 			self.families() == other.families()
 
-	def __ne__(self, other):
+	def __ne__ (self, other):
 		return not self.__eq__(other)
 
-	def pprint (self,with_changes=True):
-		changes=''
+	def pprint (self, with_changes=True):
+		changes = ''
 		if with_changes:
 			changes += '\nstatic { '
 			for changes in self.rib.incoming.queued_changes():
-				changes += '\n    %s' % changes.extensive()
+				changes += '\n\t\t%s' % changes.extensive()
 			changes += '\n}'
 
 		families = ''
 		for afi,safi in self.families():
-			families += '\n    %s %s;' % (afi.name(),safi.name())
+			families += '\n\t\t%s %s;' % (afi.name(),safi.name())
 
-		_receive  = []
+		codes = Message.CODE
 
-		_receive.extend(['      parsed;\n',]           if self.api['receive-parsed'] else [])
-		_receive.extend(['      packets;\n',]          if self.api['receive-packets'] else [])
-		_receive.extend(['      consolidate;\n',]      if self.api['consolidate'] else [])
+		_extension_receive = {
+			'receive-packets':                        'packets',
+			'receive-parsed':                         'parsed',
+			'receive-consolidate':                    'consolidate',
+			'receive-%s' % codes.NOTIFICATION.SHORT:  'notification',
+			'receive-%s' % codes.OPEN.SHORT:          'open',
+			'receive-%s' % codes.KEEPALIVE.SHORT:     'keepalive',
+			'receive-%s' % codes.UPDATE.SHORT:        'update',
+			'receive-%s' % codes.ROUTE_REFRESH.SHORT: 'refresh',
+			'receive-%s' % codes.OPERATIONAL.SHORT:   'operational',
+		}
 
-		_receive.extend(['      neighbor-changes;\n',] if self.api['neighbor-changes'] else [])
-		_receive.extend(['      notification;\n',]     if self.api[Message.ID.NOTIFICATION] else [])
-		_receive.extend(['      open;\n',]             if self.api[Message.ID.OPEN] else [])
-		_receive.extend(['      keepalive;\n',]        if self.api[Message.ID.KEEPALIVE] else [])
-		_receive.extend(['      update;\n',]           if self.api[Message.ID.UPDATE] else [])
-		_receive.extend(['      refresh;\n',]          if self.api[Message.ID.ROUTE_REFRESH] else [])
-		_receive.extend(['      operational;\n',]      if self.api[Message.ID.OPERATIONAL] else [])
-		_receive.extend(['      parsed;\n',]           if self.api['receive-parsed'] else [])
-		_receive.extend(['      packets;\n',]          if self.api['receive-packets'] else [])
-		_receive.extend(['      consolidate;\n',]      if self.api['consolidate'] else [])
+		_extension_send = {
+			'send-packets':                        'packets',
+			'send-parsed':                         'parsed',
+			'send-consolidate':                    'consolidate',
+			'send-%s' % codes.NOTIFICATION.SHORT:  'notification',
+			'send-%s' % codes.OPEN.SHORT:          'open',
+			'send-%s' % codes.KEEPALIVE.SHORT:     'keepalive',
+			'send-%s' % codes.UPDATE.SHORT:        'update',
+			'send-%s' % codes.ROUTE_REFRESH.SHORT: 'refresh',
+			'send-%s' % codes.OPERATIONAL.SHORT:   'operational',
+		}
 
+		_receive = []
+		for api,name in _extension_receive.items():
+			_receive.extend(['\t\t\t%s;\n' % name,] if self.api[api] else [])
 		receive = ''.join(_receive)
 
 		_send = []
-		_send.extend(['      packets;\n',]          if self.api['send-packets'] else [])
+		for api,name in _extension_send.items():
+			_send.extend(['\t\t\t%s;\n' % name,] if self.api[api] else [])
 		send = ''.join(_send)
 
-		return """\
-neighbor %s {
-  description "%s";
-  router-id %s;
-  local-address %s;
-  local-as %s;
-  peer-as %s;%s
-  hold-time %s;
-%s%s%s%s%s
-  capability {
-%s%s%s%s%s%s%s  }
-  family {%s
-  }
-  process {
-%s%s  }%s
-}""" % (
-	self.peer_address,
-	self.description,
-	self.router_id,
-	self.local_address,
-	self.local_as,
-	self.peer_as,
-	'\n  passive;\n' if self.passive else '',
-	self.hold_time,
-	'  group-updates: %s;\n' % (self.group_updates if self.group_updates else ''),
-	'  auto-flush: %s;\n' % ('true' if self.flush else 'false'),
-	'  adj-rib-out: %s;\n' % ('true' if self.adjribout else 'false'),
-	'  md5 "%s";\n' % self.md5 if self.md5 else '',
-	'  ttl-security: %s;\n' % (self.ttl if self.ttl else ''),
-	'    asn4 %s;\n' % ('enable' if self.asn4 else 'disable'),
-	'    route-refresh %s;\n' % ('enable' if self.route_refresh else 'disable'),
-	'    graceful-restart %s;\n' % (self.graceful_restart if self.graceful_restart else 'disable'),
-	'    add-path %s;\n' % (AddPath.string[self.add_path] if self.add_path else 'disable'),
-	'    multi-session %s;\n' % ('enable' if self.multisession else 'disable'),
-	'    operational %s;\n' % ('enable' if self.operational else 'disable'),
-	'    aigp %s;\n' % ('enable' if self.aigp else 'disable'),
-	families,
-	'    receive {\n%s    }\n' % receive if receive else '',
-	'    send {\n%s    }\n' % send if send else '',
-	changes
-)
+		returned = \
+			'neighbor %s {\n' \
+			'\tdescription "%s";\n' \
+			'\trouter-id %s;\n' \
+			'\thost-name %s;\n' \
+			'\tdomain-name %s;\n' \
+			'\tlocal-address %s;\n' \
+			'\tlocal-as %s;\n' \
+			'\tpeer-as %s;\n' \
+			'\thold-time %s;\n' \
+			'\tmanual-eor %s;\n' \
+			'%s%s%s%s%s%s%s%s%s\n' \
+			'\tcapability {\n' \
+			'%s%s%s%s%s%s%s%s\t}\n' \
+			'\tfamily {%s\n' \
+			'\t}\n' \
+			'\tprocess {\n' \
+			'%s%s\t}%s\n' \
+			'}' % (
+				self.peer_address,
+				self.description,
+				self.router_id,
+				self.host_name,
+				self.domain_name,
+				self.local_address,
+				self.local_as,
+				self.peer_as,
+				self.hold_time,
+				'true' if self.manual_eor else 'false',
+				'\n\tpassive;\n' if self.passive else '',
+				'\n\tlisten %d;\n' % self.listen if self.listen else '',
+				'\n\tconnect %d;\n' % self.connect if self.connect else '',
+				'\tgroup-updates: %s;\n' % (self.group_updates if self.group_updates else ''),
+				'\tauto-flush: %s;\n' % ('true' if self.flush else 'false'),
+				'\tadj-rib-out: %s;\n' % ('true' if self.adjribout else 'false'),
+				'\tmd5-password "%s";\n' % self.md5_password if self.md5_password else '',
+				'\tmd5-ip "%s";\n' % self.md5_ip if self.md5_ip else '',
+				'\toutgoing-ttl: %s;\n' % (self.ttl_out if self.ttl_out else ''),
+				'\tincoming-ttl: %s;\n' % (self.ttl_in if self.ttl_in else ''),
+				'\t\tasn4 %s;\n' % ('enable' if self.asn4 else 'disable'),
+				'\t\troute-refresh %s;\n' % ('enable' if self.route_refresh else 'disable'),
+				'\t\tgraceful-restart %s;\n' % (self.graceful_restart if self.graceful_restart else 'disable'),
+				'\t\tadd-path %s;\n' % (AddPath.string[self.add_path] if self.add_path else 'disable'),
+				'\t\tmulti-session %s;\n' % ('enable' if self.multisession else 'disable'),
+				'\t\toperational %s;\n' % ('enable' if self.operational else 'disable'),
+				'\t\taigp %s;\n' % ('enable' if self.aigp else 'disable'),
+				families,
+				'\t\treceive {\n%s\t\t}\n' % receive if receive else '',
+				'\t\tsend {\n%s\t\t}\n' % send if send else '',
+				changes
+			)
+		return returned.replace('\t','  ')
 
 	def __str__ (self):
 		return self.pprint(False)

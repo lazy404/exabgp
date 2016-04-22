@@ -3,32 +3,31 @@
 update/__init__.py
 
 Created by Thomas Mangin on 2009-11-05.
-Copyright (c) 2009-2013 Exa Networks. All rights reserved.
+Copyright (c) 2009-2015 Exa Networks. All rights reserved.
 """
 
 from struct import pack
 from struct import unpack
 
-from exabgp.protocol.ip import NoIP
+from exabgp.protocol.ip import NoNextHop
 from exabgp.protocol.family import AFI
 from exabgp.protocol.family import SAFI
 
-from exabgp.bgp.message import Message
-from exabgp.bgp.message import IN
-from exabgp.bgp.message import OUT
+from exabgp.bgp.message.direction import IN
+from exabgp.bgp.message.direction import OUT
+from exabgp.bgp.message.message import Message
 from exabgp.bgp.message.update.eor import EOR
 
 from exabgp.bgp.message.update.attribute import Attributes
-from exabgp.bgp.message.update.attribute.attribute import Attribute
-from exabgp.bgp.message.update.attribute.mprnlri import MPRNLRI
-from exabgp.bgp.message.update.attribute.mprnlri import EMPTY_MPRNLRI
-from exabgp.bgp.message.update.attribute.mpurnlri import MPURNLRI
-from exabgp.bgp.message.update.attribute.mpurnlri import EMPTY_MPURNLRI
+from exabgp.bgp.message.update.attribute import Attribute
+from exabgp.bgp.message.update.attribute import MPRNLRI
+from exabgp.bgp.message.update.attribute import EMPTY_MPRNLRI
+from exabgp.bgp.message.update.attribute import MPURNLRI
+from exabgp.bgp.message.update.attribute import EMPTY_MPURNLRI
 
 from exabgp.bgp.message.notification import Notify
-from exabgp.bgp.message.update.nlri.nlri import NLRI
+from exabgp.bgp.message.update.nlri import NLRI
 
-from exabgp.util.od import od
 from exabgp.logger import Logger
 from exabgp.logger import LazyFormat
 
@@ -54,13 +53,13 @@ from exabgp.logger import LazyFormat
 # |   Prefix (variable)       |
 # +---------------------------+
 
-
+@Message.register
 class Update (Message):
-	ID = Message.ID.UPDATE
-	TYPE = chr(Message.ID.UPDATE)
+	ID = Message.CODE.UPDATE
+	TYPE = chr(Message.CODE.UPDATE)
 	EOR = False
 
-	def __init__ (self,nlris,attributes):
+	def __init__ (self, nlris, attributes):
 		self.nlris = nlris
 		self.attributes = attributes
 
@@ -69,9 +68,9 @@ class Update (Message):
 	def __str__ (self):
 		return '\n'.join(['%s%s' % (str(self.nlris[n]),str(self.attributes)) for n in range(len(self.nlris))])
 
-
 	@staticmethod
 	def prefix (data):
+		# This function needs renaming
 		return '%s%s' % (pack('!H',len(data)),data)
 
 	@staticmethod
@@ -93,7 +92,7 @@ class Update (Message):
 		if len(attributes) != len_attributes:
 			raise Notify(3,1,'invalid total path attribute length, not enough data available')
 
-		if 2 + len_withdrawn + 2+ len_attributes + len(announced) != length:
+		if 2 + len_withdrawn + 2 + len_attributes + len(announced) != length:
 			raise Notify(3,1,'error in BGP message length, not enough data for the size announced')
 
 		return withdrawn,attributes,announced
@@ -102,7 +101,7 @@ class Update (Message):
 	# XXX: FIXME: calculate size progressively to not have to do it every time
 	# XXX: FIXME: we could as well track when packed_del, packed_mp_del, etc
 	# XXX: FIXME: are emptied and therefore when we can save calculations
-	def messages (self,negotiated):
+	def messages (self, negotiated):
 		# sort the nlris
 
 		add_nlri = []
@@ -113,12 +112,12 @@ class Update (Message):
 		for nlri in self.nlris:
 			if nlri.family() in negotiated.families:
 				if nlri.afi == AFI.ipv4 and nlri.safi in [SAFI.unicast, SAFI.multicast]:
-					if nlri.action == OUT.announce:
+					if nlri.action == OUT.ANNOUNCE:
 						add_nlri.append(nlri)
 					else:
 						del_nlri.append(nlri)
 				else:
-					if nlri.action == OUT.announce:
+					if nlri.action == OUT.ANNOUNCE:
 						add_mp.setdefault(nlri.family(),[]).append(nlri)
 					else:
 						del_mp.setdefault(nlri.family(),[]).append(nlri)
@@ -135,12 +134,12 @@ class Update (Message):
 
 		packed_del = ''
 		msg_size = negotiated.msg_size - 19 - 2 - 2  # 2 bytes for each of the two prefix() header
-		addpath = negotiated.addpath.send(AFI.ipv4,SAFI.unicast)
 
 		while del_nlri:
 			nlri = del_nlri.pop()
-			packed = nlri.pack(addpath)
-			if len(packed_del + packed) >= msg_size:
+			packed = nlri.pack(negotiated)
+			seen_size = len(packed_del + packed)
+			if seen_size > msg_size:
 				if not packed_del:
 					raise Notify(6,0,'attributes size is so large we can not even pack one NLRI')
 				yield self._message(Update.prefix(packed_del) + Update.prefix(''))
@@ -157,12 +156,13 @@ class Update (Message):
 			family = families.pop()
 			afi,safi = family
 			mps = del_mp[family]
-			addpath = negotiated.addpath.send(*family)
-			mp_packed_generator = MPURNLRI(afi,safi,mps).packed_attributes(addpath)
+			seen_size = len(packed_del + packed_mp_del)
+			mp_packed_generator = MPURNLRI(afi,safi,mps).packed_attributes(negotiated)
 			try:
 				while True:
 					packed = mp_packed_generator.next()
-					if len(packed_del + packed_mp_del + packed) >= msg_size:
+					seen_size = len(packed_del + packed_mp_del + packed)
+					if seen_size > msg_size:
 						if not packed_mp_del and not packed_del:
 							raise Notify(6,0,'attributes size is so large we can not even pack one MPURNLRI')
 						yield self._message(Update.prefix(packed_del) + Update.prefix(packed_mp_del))
@@ -182,7 +182,8 @@ class Update (Message):
 
 		if add_mp:
 			msg_size = negotiated.msg_size - 19 - 2 - 2 - len(attr)  # 2 bytes for each of the two prefix() header
-		if len(packed_del + packed_mp_del) >= msg_size:
+		seen_size = len(packed_del + packed_mp_del)
+		if seen_size > msg_size:
 			yield self._message(Update.prefix(packed_del) + Update.prefix(packed_mp_del))
 			packed_del = ''
 			packed_mp_del = ''
@@ -192,12 +193,13 @@ class Update (Message):
 			family = families.pop()
 			afi,safi = family
 			mps = add_mp[family]
-			addpath = negotiated.addpath.send(*family)
-			mp_packed_generator = MPRNLRI(afi,safi,mps).packed_attributes(addpath)
+			seen_size = len(packed_del + packed_mp_del + packed_mp_add)
+			mp_packed_generator = MPRNLRI(afi,safi,mps).packed_attributes(negotiated)
 			try:
 				while True:
 					packed = mp_packed_generator.next()
-					if len(packed_del + packed_mp_del + packed_mp_add + packed) >= msg_size:
+					seen_size = len(packed_del + packed_mp_del + packed_mp_add + packed)
+					if seen_size > msg_size:
 						if not packed_mp_add and not packed_mp_del and not packed_del:
 							raise Notify(6,0,'attributes size is so large we can not even pack on MPURNLRI')
 						yield self._message(Update.prefix(packed_del) + Update.prefix(attr + packed_mp_del + packed_mp_add))
@@ -215,7 +217,8 @@ class Update (Message):
 
 		if add_nlri:
 			msg_size = negotiated.msg_size - 19 - 2 - 2 - len(attr)  # 2 bytes for each of the two prefix() header
-		if len(packed_del + packed_mp_del + packed_mp_add) >= msg_size:
+		seen_size = len(packed_del + packed_mp_del + packed_mp_add)
+		if seen_size > msg_size:
 			yield self._message(Update.prefix(packed_del) + Update.prefix(packed_mp_del))
 			packed_del = ''
 			packed_mp_del = ''
@@ -224,8 +227,9 @@ class Update (Message):
 
 		while add_nlri:
 			nlri = add_nlri.pop()
-			packed = nlri.pack(addpath)
-			if len(packed_del + packed_mp_del + packed_mp_add + packed_add + packed) >= msg_size:
+			packed = nlri.pack(negotiated)
+			seen_size = len(packed_del + packed_mp_del + packed_mp_add + packed_add + packed)
+			if seen_size > msg_size:
 				if not packed_add and not packed_mp_add and not packed_mp_del and not packed_del:
 					raise Notify(6,0,'attributes size is so large we can not even pack one NLRI')
 				if packed_mp_add:
@@ -242,18 +246,17 @@ class Update (Message):
 
 		yield self._message(Update.prefix(packed_del) + Update.prefix(attr + packed_mp_del + packed_mp_add) + packed_add)
 
-
 	# XXX: FIXME: this can raise ValueError. IndexError,TypeError, struct.error (unpack) = check it is well intercepted
 	@classmethod
-	def unpack_message (cls,data,negotiated):
+	def unpack_message (cls, data, negotiated):
 		logger = Logger()
 
 		length = len(data)
 
 		# This could be speed up massively by changing the order of the IF
-		if length == 23:
-			return EOR(AFI.ipv4,SAFI.unicast,IN.announced)
-		if length == 30 and data.startswith(EOR.NLRI.PREFIX):
+		if length == 4 and data == '\x00\x00\x00\x00':
+			return EOR(AFI.ipv4,SAFI.unicast,IN.ANNOUNCED)  # pylint: disable=E1101
+		if length == 11 and data.startswith(EOR.NLRI.PREFIX):
 			return EOR.unpack_message(data,negotiated)
 
 		withdrawn, _attributes, announced = cls.split(data)
@@ -267,20 +270,24 @@ class Update (Message):
 		# Is the peer going to send us some Path Information with the route (AddPath)
 		addpath = negotiated.addpath.receive(AFI(AFI.ipv4),SAFI(SAFI.unicast))
 
-		# empty string for NoIP, the packed IP otherwise (without the 3/4 bytes of attributes headers)
-		nexthop = attributes.get(Attribute.ID.NEXT_HOP,NoIP).packed
+		# empty string for NoNextHop, the packed IP otherwise (without the 3/4 bytes of attributes headers)
+		nexthop = attributes.get(Attribute.CODE.NEXT_HOP,NoNextHop)
+		# nexthop = NextHop.unpack(_nexthop.ton())
+
+		# XXX: NEXTHOP MUST NOT be the IP address of the receiving speaker.
 
 		nlris = []
 		while withdrawn:
-			length,nlri = NLRI.unpack(AFI.ipv4,SAFI.unicast,withdrawn,addpath,nexthop,IN.withdrawn)
-			logger.parser(LazyFormat("parsed withdraw nlri %s payload " % nlri,od,withdrawn[:len(nlri)]))
-			withdrawn = withdrawn[length:]
+			nlri,left = NLRI.unpack_nlri(AFI.ipv4,SAFI.unicast,withdrawn,IN.WITHDRAWN,addpath)
+			logger.parser(LazyFormat("parsed withdraw nlri %s payload " % nlri,withdrawn[:len(nlri)]))
+			withdrawn = left
 			nlris.append(nlri)
 
 		while announced:
-			length,nlri = NLRI.unpack(AFI.ipv4,SAFI.unicast,announced,addpath,nexthop,IN.announced)
-			logger.parser(LazyFormat("parsed announce nlri %s payload " % nlri,od,announced[:len(nlri)]))
-			announced = announced[length:]
+			nlri,left = NLRI.unpack_nlri(AFI.ipv4,SAFI.unicast,announced,IN.ANNOUNCED,addpath)
+			nlri.nexthop = nexthop
+			logger.parser(LazyFormat("parsed announce nlri %s payload " % nlri,announced[:len(nlri)]))
+			announced = left
 			nlris.append(nlri)
 
 		# required for 'is' comparaison
@@ -307,6 +314,3 @@ class Update (Message):
 			raise RuntimeError('This was not expected')
 
 		return Update(nlris,attributes)
-
-
-Update.register_message()

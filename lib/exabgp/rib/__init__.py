@@ -3,10 +3,11 @@
 rib/__init__.py
 
 Created by Thomas Mangin on 2010-01-15.
-Copyright (c) 2009-2013  Exa Networks. All rights reserved.
+Copyright (c) 2009-2015 Exa Networks. All rights reserved.
 """
 
 from exabgp.rib.store import Store
+
 
 class RIB (object):
 
@@ -15,7 +16,9 @@ class RIB (object):
 
 	_cache = {}
 
-	def __init__ (self,name,adjribout,families):
+	def __init__ (self, name, adjribout, families):
+		self.name = name
+
 		if name in self._cache:
 			self.incoming = self._cache[name].incoming
 			self.outgoing = self._cache[name].outgoing
@@ -33,3 +36,8 @@ class RIB (object):
 	def reset (self):
 		self.incoming.reset()
 		self.outgoing.reset()
+
+	# This code was never tested ...
+	def clear (self):
+		self._cache[self.name].incoming = Store(self._cache[self.name].incoming.families)
+		self._cache[self.name].outgoing = Store(self._cache[self.name].incoming.families)

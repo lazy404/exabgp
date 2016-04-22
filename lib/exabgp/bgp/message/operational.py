@@ -3,7 +3,7 @@
 operational/__init__.py
 
 Created by Thomas Mangin on 2013-09-01.
-Copyright (c) 2009-2013 Exa Networks. All rights reserved.
+Copyright (c) 2009-2015 Exa Networks. All rights reserved.
 """
 
 from struct import pack
@@ -12,12 +12,13 @@ from struct import unpack
 from exabgp.protocol.family import AFI
 from exabgp.protocol.family import SAFI
 from exabgp.bgp.message.open.routerid import RouterID
-from exabgp.bgp.message import Message
+from exabgp.bgp.message.message import Message
 
 # ========================================================================= Type
 #
 
 MAX_ADVISORY = 2048  # 2K
+
 
 class Type (int):
 	def pack (self):
@@ -36,9 +37,10 @@ class Type (int):
 # ================================================================== Operational
 #
 
+@Message.register
 class Operational (Message):
-	ID = Message.ID.OPERATIONAL
-	TYPE = chr(Message.ID.OPERATIONAL)
+	ID = Message.CODE.OPERATIONAL
+	TYPE = chr(Message.CODE.OPERATIONAL)
 
 	registered_operational = dict()
 
@@ -46,9 +48,11 @@ class Operational (Message):
 	has_routerid = False
 	is_fault = False
 
-	class ID (object):
+	# really this should be called ID if not for the naming conflict
+	class CODE (object):
 		__slots__ = []
 
+		NOP  = 0x00  # Not defined by the RFC
 		# ADVISE
 		ADM  = 0x01  # 01: Advisory Demand Message
 		ASM  = 0x02  # 02: Advisory Static Message
@@ -69,12 +73,16 @@ class Operational (Message):
 		MP   = 0xFFFE  # 65534: Max Permitted
 		NS   = 0xFFFF  # 65535: Not Satisfied
 
+	# XXX: FIXME: should be upper case
+	name = ''
+	category = ''
+	code = CODE.NOP
 
-	def __init__ (self,what):
+	def __init__ (self, what):
 		Message.__init__(self)
 		self.what = Type(what)
 
-	def _message (self,data):
+	def _message (self, data):
 		return Message._message(self,"%s%s%s" % (
 			self.what.pack(),
 			pack('!H',len(data)),
@@ -87,12 +95,13 @@ class Operational (Message):
 	def extensive (self):
 		return 'operational %s' % self.name
 
-	@classmethod
-	def register_operational (cls):
-		cls.registered_operational[cls.code] = (cls.category,cls)
+	@staticmethod
+	def register (klass):
+		Operational.registered_operational[klass.code] = (klass.category,klass)
+		return klass
 
 	@classmethod
-	def unpack_message (cls,data,negotiated):
+	def unpack_message (cls, data, negotiated):  # pylint: disable=W0613
 		what = Type(unpack('!H',data[0:2])[0])
 		length = unpack('!H',data[2:4])[0]
 
@@ -119,8 +128,6 @@ class Operational (Message):
 		else:
 			print 'ignoring ATM this kind of message'
 
-Operational.register_message()
-
 
 # ============================================================ OperationalFamily
 #
@@ -128,7 +135,7 @@ Operational.register_message()
 class OperationalFamily (Operational):
 	has_family = True
 
-	def __init__ (self,what,afi,safi,data=''):
+	def __init__ (self, what, afi, safi, data=''):
 		Operational.__init__(self,what)
 		self.afi = AFI(afi)
 		self.safi = SAFI(safi)
@@ -137,32 +144,33 @@ class OperationalFamily (Operational):
 	def family (self):
 		return (self.afi,self.safi)
 
-	def _message (self,data):
+	def _message (self, data):
 		return Operational._message(self,"%s%s%s" % (
 			self.afi.pack(),
 			self.safi.pack(),
 			data
 		))
 
-	def message (self,negotiated):
+	def message (self, negotiated):
 		return self._message(self.data)
 
 
 # =================================================== SequencedOperationalFamily
 #
 
+
 class SequencedOperationalFamily (OperationalFamily):
 	__sequence_number = {}
 	has_routerid = True
 
-	def __init__ (self,what,afi,safi,routerid,sequence,data=''):
+	def __init__ (self, what, afi, safi, routerid, sequence, data=''):
 		OperationalFamily.__init__(self,what,afi,safi,data)
 		self.routerid = routerid if routerid else None
 		self.sequence = sequence if sequence else None
 		self._sequence = self.sequence
 		self._routerid = self.routerid
 
-	def message (self,negotiated):
+	def message (self, negotiated):
 		self.sent_routerid = self.routerid if self.routerid else negotiated.sent_open.router_id
 		if self.sequence is None:
 			self.sent_sequence = (self.__sequence_number.setdefault(self.routerid,0) + 1) % 0xFFFFFFFF
@@ -179,7 +187,8 @@ class SequencedOperationalFamily (OperationalFamily):
 # =========================================================================== NS
 #
 
-class NS:
+
+class NS (object):
 	MALFORMED   = 0x01  # Request TLV Malformed
 	UNSUPPORTED = 0x02  # TLV Unsupported for this neighbor
 	MAXIMUM     = 0x03  # Max query frequency exceeded
@@ -190,17 +199,16 @@ class NS:
 	class _NS (OperationalFamily):
 		is_fault = True
 
-		def __init__ (self,afi,safi,sequence):
+		def __init__ (self, afi, safi, sequence):
 			OperationalFamily.__init__(
 				self,
-				Operational.ID.NS,
+				Operational.CODE.NS,
 				afi,safi,
 				'%s%s' % (sequence,self.ERROR_SUBCODE)
 			)
 
 		def extensive (self):
 			return 'operational NS %s %s/%s' % (self.name,self.afi,self.safi)
-
 
 	class Malformed (_NS):
 		name = 'NS malformed'
@@ -230,57 +238,53 @@ class NS:
 # ===================================================================== Advisory
 #
 
-class Advisory:
+
+class Advisory (object):
 	class _Advisory (OperationalFamily):
 		category = 'advisory'
 
 		def extensive (self):
 			return 'operational %s afi %s safi %s "%s"' % (self.name,self.afi,self.safi,self.data)
 
+	@Operational.register
 	class ADM (_Advisory):
 		name = 'ADM'
-		code = Operational.ID.ADM
+		code = Operational.CODE.ADM
 
-		def __init__ (self,afi,safi,advisory,routerid=None):
+		def __init__ (self, afi, safi, advisory, routerid=None):
 			utf8 = advisory.encode('utf-8')
 			if len(utf8) > MAX_ADVISORY:
 				utf8 = utf8[:MAX_ADVISORY-3] + '...'.encode('utf-8')
-			OperationalFamily.__init__(
-				self,Operational.ID.ADM,
+			Advisory._Advisory.__init__(
+				self,Operational.CODE.ADM,
 				afi,safi,
 				utf8
 			)
 
+	@Operational.register
 	class ASM (_Advisory):
 		name = 'ASM'
-		code = Operational.ID.ASM
+		code = Operational.CODE.ASM
 
-		def __init__ (self,afi,safi,advisory,routerid=None):
+		def __init__ (self, afi, safi, advisory, routerid=None):
 			utf8 = advisory.encode('utf-8')
 			if len(utf8) > MAX_ADVISORY:
 				utf8 = utf8[:MAX_ADVISORY-3] + '...'.encode('utf-8')
-			OperationalFamily.__init__(
-				self,Operational.ID.ASM,
+			Advisory._Advisory.__init__(
+				self,Operational.CODE.ASM,
 				afi,safi,
 				utf8
 			)
 
-Advisory.ADM.register_operational()
-Advisory.ASM.register_operational()
-
-# a = Advisory.ADM(1,1,'string 1')
-# print a.extensive()
-# b = Advisory.ASM(1,1,'string 2')
-# print b.extensive()
 
 # ======================================================================== Query
 #
 
-class Query:
+class Query (object):
 	class _Query (SequencedOperationalFamily):
 		category = 'query'
 
-		def __init__ (self,afi,safi,routerid,sequence):
+		def __init__ (self, afi, safi, routerid, sequence):
 			SequencedOperationalFamily.__init__(
 				self,self.code,
 				afi,safi,
@@ -296,31 +300,30 @@ class Query:
 				)
 			return 'operational %s afi %s safi %s' % (self.name,self.afi,self.safi)
 
+	@Operational.register
 	class RPCQ (_Query):
 		name = 'RPCQ'
-		code = Operational.ID.RPCQ
+		code = Operational.CODE.RPCQ
 
+	@Operational.register
 	class APCQ (_Query):
 		name = 'APCQ'
-		code = Operational.ID.APCQ
+		code = Operational.CODE.APCQ
 
+	@Operational.register
 	class LPCQ (_Query):
 		name = 'LPCQ'
-		code = Operational.ID.LPCQ
-
-Query.RPCQ.register_operational()
-Query.APCQ.register_operational()
-Query.LPCQ.register_operational()
+		code = Operational.CODE.LPCQ
 
 
 # ===================================================================== Response
 #
 
-class Response:
+class Response (object):
 	class _Counter (SequencedOperationalFamily):
 		category = 'counter'
 
-		def __init__ (self,afi,safi,routerid,sequence,counter):
+		def __init__ (self, afi, safi, routerid, sequence, counter):
 			self.counter = counter
 			SequencedOperationalFamily.__init__(
 				self,self.code,
@@ -339,30 +342,24 @@ class Response:
 				)
 			return 'operational %s afi %s safi %s counter %d' % (self.name,self.afi,self.safi,self.counter)
 
+	@Operational.register
 	class RPCP (_Counter):
 		name = 'RPCP'
-		code = Operational.ID.RPCP
+		code = Operational.CODE.RPCP
 
+	@Operational.register
 	class APCP (_Counter):
 		name = 'APCP'
-		code = Operational.ID.APCP
+		code = Operational.CODE.APCP
 
+	@Operational.register
 	class LPCP (_Counter):
 		name = 'LPCP'
-		code = Operational.ID.LPCP
+		code = Operational.CODE.LPCP
 
-
-Response.RPCP.register_operational()
-Response.APCP.register_operational()
-Response.LPCP.register_operational()
-
-# c = State.RPCQ(1,1,'82.219.0.1',10)
-# print c.extensive()
-# d = State.RPCP(1,1,'82.219.0.1',10,10000)
-# print d.extensive()
 
 # ========================================================================= Dump
 #
 
-class Dump:
+class Dump (object):
 	pass

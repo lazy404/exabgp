@@ -3,77 +3,108 @@
 mprnlri.py
 
 Created by Thomas Mangin on 2009-11-05.
-Copyright (c) 2009-2013 Exa Networks. All rights reserved.
+Copyright (c) 2009-2015 Exa Networks. All rights reserved.
 """
 
 from struct import unpack
 
-from exabgp.protocol.ip import NoIP
+from exabgp.protocol.ip import NoNextHop
 from exabgp.protocol.family import AFI
 from exabgp.protocol.family import SAFI
-from exabgp.protocol.ip.address import Address
+from exabgp.protocol.family import Family
 
-from exabgp.bgp.message import IN
-from exabgp.bgp.message.update.attribute.attribute import Attribute
-from exabgp.bgp.message.update.nlri.nlri import NLRI
+from exabgp.bgp.message.direction import IN
+# from exabgp.bgp.message.update.attribute.attribute import Attribute
+from exabgp.bgp.message.update.attribute import Attribute
+from exabgp.bgp.message.update.attribute import NextHop
+from exabgp.bgp.message.update.nlri import NLRI
 
 from exabgp.bgp.message.notification import Notify
+# from exabgp.bgp.message.open.capability import Negotiated
+
 
 # ==================================================== MP Unreacheable NLRI (15)
+#
 
-class MPRNLRI (Attribute,Address):
+@Attribute.register()
+class MPRNLRI (Attribute,Family):
 	FLAG = Attribute.Flag.OPTIONAL
-	ID = Attribute.ID.MP_REACH_NLRI
-	MULTIPLE = True
+	ID = Attribute.CODE.MP_REACH_NLRI
 
-	__slots__ = ['nlris']
+	# __slots__ = ['nlris']
 
-	def __init__ (self,afi,safi,nlris):
-		Address.__init__(self,afi,safi)
+	def __init__ (self, afi, safi, nlris):
+		Family.__init__(self,afi,safi)
 		# all the routes must have the same next-hop
 		self.nlris = nlris
 
-	def packed_attributes (self,addpath):
+	def __eq__ (self, other):
+		return \
+			self.ID == other.ID and \
+			self.FLAG == other.FLAG and \
+			self.nlris == other.nlris
+
+	def __ne__ (self, other):
+		return not self.__eq__(other)
+
+	def packed_attributes (self, negotiated):
 		if not self.nlris:
 			return
 
+		# addpath = negotiated.addpath.send(self.afi,self.safi)
+		# nexthopself = negotiated.nexthopself(self.afi)
+		maximum = negotiated.FREE_SIZE
+
 		mpnlri = {}
 		for nlri in self.nlris:
-			if nlri.nexthop is NoIP:
+			if nlri.nexthop is NoNextHop:
 				# EOR and Flow may not have any next_hop
 				nexthop = ''
 			else:
 				# we do not want a next_hop attribute packed (with the _attribute()) but just the next_hop itself
 				if nlri.safi.has_rd():
 					# .packed and not .pack()
-					nexthop = chr(0)*8 + nlri.nexthop.packed
+					nexthop = chr(0)*8 + nlri.nexthop.ton(negotiated,nlri.afi)
 				else:
 					# .packed and not .pack()
-					nexthop = nlri.nexthop.packed
+					nexthop = nlri.nexthop.ton(negotiated,nlri.afi)
 
 			# mpunli[afi,safi][nexthop] = nlri
-			mpnlri.setdefault((nlri.afi.pack(),nlri.safi.pack()),{}).setdefault(nexthop,[]).append(nlri.pack(addpath))
+			mpnlri.setdefault((nlri.afi.pack(),nlri.safi.pack()),{}).setdefault(nexthop,[]).append(nlri.pack(negotiated))
 
 		for (pafi,psafi),data in mpnlri.iteritems():
 			for nexthop,nlris in data.iteritems():
-				yield self._attribute(
-					pafi + psafi +
-					chr(len(nexthop)) + nexthop +
+				payload = \
+					pafi + psafi + \
+					chr(len(nexthop)) + nexthop + \
 					chr(0) + ''.join(nlris)
-				)
 
-	def pack (self,addpath):
-		return ''.join(self.packed_attributes(addpath))
+				if self._len(payload) <= maximum:
+					yield self._attribute(payload)
+					continue
+
+				# This will not generate an optimum update size..
+				# we should feedback the maximum on each iteration
+
+				for nlri in nlris:
+					yield self._attribute(
+						pafi + psafi +
+						chr(len(nexthop)) + nexthop +
+						chr(0) + nlri
+					)
+
+	def pack (self, negotiated):
+		return ''.join(self.packed_attributes(negotiated))
 
 	def __len__ (self):
 		raise RuntimeError('we can not give you the size of an MPRNLRI - was it with our witout addpath ?')
 		# return len(self.pack(False))
 
-	def __str__ (self):
+	def __repr__ (self):
 		return "MP_REACH_NLRI for %s %s with %d NLRI(s)" % (self.afi,self.safi,len(self.nlris))
 
 	@classmethod
-	def unpack (cls,data,negotiated):
+	def unpack (cls, data, negotiated):
 		nlris = []
 
 		# -- Reading AFI/SAFI
@@ -81,7 +112,7 @@ class MPRNLRI (Attribute,Address):
 		offset = 3
 
 		# we do not want to accept unknown families
-		if (afi,safi) not in negotiated.families:
+		if negotiated and (afi,safi) not in negotiated.families:
 			raise Notify(3,0,'presented a non-negotiated family %d/%d' % (afi,safi))
 
 		# -- Reading length of next-hop
@@ -90,7 +121,7 @@ class MPRNLRI (Attribute,Address):
 
 		rd = 0
 
-		# check next-hope size
+		# check next-hop size
 		if afi == AFI.ipv4:
 			if safi in (SAFI.unicast,SAFI.multicast):
 				if len_nh != 4:
@@ -105,6 +136,9 @@ class MPRNLRI (Attribute,Address):
 			elif safi in (SAFI.flow_vpn,):
 				if len_nh not in (0,4):
 					raise Notify(3,0,'invalid ipv4 flow_vpn next-hop length %d expected 4' % len_nh)
+			elif safi in (SAFI.rtc,):
+				if len_nh not in (4,16):
+					raise Notify(3,0,'invalid ipv4 rtc next-hop length %d expected 4' % len_nh)
 		elif afi == AFI.ipv6:
 			if safi in (SAFI.unicast,):
 				if len_nh not in (16,32):
@@ -119,6 +153,9 @@ class MPRNLRI (Attribute,Address):
 			elif safi in (SAFI.flow_vpn,):
 				if len_nh not in (0,16,32):
 					raise Notify(3,0,'invalid ipv6 flow_vpn next-hop length %d expected 0, 16 or 32' % len_nh)
+		elif afi == AFI.l2vpn:
+			if len_nh != 4:
+				Notify(3,0,'invalid l2vpn next-hop length %d expected 4' % len_nh)
 		size = len_nh - rd
 
 		# XXX: FIXME: GET IT FROM CACHE HERE ?
@@ -150,17 +187,18 @@ class MPRNLRI (Attribute,Address):
 		while data:
 			if nexthops:
 				for nexthop in nexthops:
-					length,nlri = NLRI.unpack(afi,safi,data,addpath,nexthop,IN.announced)
+					nlri,left = NLRI.unpack_nlri(afi,safi,data,IN.ANNOUNCED,addpath)
+					nlri.nexthop = NextHop.unpack(nexthop)
 					nlris.append(nlri)
 			else:
-				length,nlri = NLRI.unpack(afi,safi,data,addpath,'',IN.announced)
+				nlri,left = NLRI.unpack_nlri(afi,safi,data,IN.ANNOUNCED,addpath)
 				nlris.append(nlri)
 
-			#logger.parser(LazyFormat("parsed announce mp nlri %s payload " % nlri,od,data[:length]))
-			data = data[length:]
+			if left == data:
+				raise RuntimeError("sub-calls should consume data")
+
+			# logger.parser(LazyFormat("parsed announce mp nlri %s payload " % nlri,data[:length]))
+			data = left
 		return cls(afi,safi,nlris)
-
-
-MPRNLRI.register_attribute()
 
 EMPTY_MPRNLRI  = MPRNLRI(AFI(AFI.undefined),SAFI(SAFI.undefined),[])

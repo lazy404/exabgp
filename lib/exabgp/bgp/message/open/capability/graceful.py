@@ -3,20 +3,23 @@
 graceful.py
 
 Created by Thomas Mangin on 2012-07-17.
-Copyright (c) 2009-2013 Exa Networks. All rights reserved.
+Copyright (c) 2009-2015 Exa Networks. All rights reserved.
 """
 
 from struct import pack
 from struct import unpack
 from exabgp.protocol.family import AFI
 from exabgp.protocol.family import SAFI
-from exabgp.bgp.message.open.capability import Capability
+from exabgp.bgp.message.open.capability.capability import Capability
 
 # =========================================================== Graceful (Restart)
 # RFC 4727
 
+
+@Capability.register()
 class Graceful (Capability,dict):
-	ID = Capability.ID.GRACEFUL_RESTART
+	MAX = 0xFFFF
+	ID = Capability.CODE.GRACEFUL_RESTART
 
 	TIME_MASK     = 0x0FFF
 	FLAG_MASK     = 0xF000
@@ -25,7 +28,7 @@ class Graceful (Capability,dict):
 	RESTART_STATE = 0x08
 	FORWARDING_STATE = 0x80
 
-	def set (self,restart_flag,restart_time,protos):
+	def set (self, restart_flag, restart_time, protos):
 		self.restart_flag = restart_flag
 		self.restart_time = restart_time & Graceful.TIME_MASK
 		for afi,safi,family_flag in protos:
@@ -47,17 +50,23 @@ class Graceful (Capability,dict):
 		d = {
 			'name':'"graceful restart"',
 			'time':self.restart_time,
-			'address family flags':'{ %s} ' % ', '.join('"%s/%s": [ %s]' % (afi, safi, '"restart" ' if family & 0x80 else '') for afi, safi, family in [(str(afi), str(safi), self[(afi, safi)]) for (afi, safi) in self.keys()]),
-			'restart flags':'[ %s] ' % ('"forwarding" ' if self.restart_flag & 0x8 else '')
+			'address-family-flags':'{%s } ' % (
+				', '.join('"%s/%s": [%s ]' % (
+					' %s' % afi, safi, ' "restart"' if family & 0x80 else '') for afi, safi, family in [
+						(str(a), str(s), self[(a,s)]) for (a,s) in self.keys()
+					]
+				)
+			),
+			'restart-flags':'[%s] ' % (' "forwarding" ' if self.restart_flag & 0x8 else ' ')
 		}
 
-		return '{ %s} ' % ','.join('"%s": %s' % (k,v) for k,v in d.iteritems())
+		return '{ %s}' % ','.join('"%s": %s' % (k,v) for k,v in d.iteritems())
 
 	def families (self):
 		return self.keys()
 
 	@staticmethod
-	def unpack (what,instance,data):
+	def unpack_capability (instance, data, capability=None):  # pylint: disable=W0613
 		# XXX: FIXME: should raise if instance was already setup
 		restart = unpack('!H',data[:2])[0]
 		restart_flag = restart >> 12
@@ -71,5 +80,3 @@ class Graceful (Capability,dict):
 			families.append((afi,safi,flag_family))
 			data = data[4:]
 		return instance.set(restart_flag,restart_time,families)
-
-Graceful.register_capability()
